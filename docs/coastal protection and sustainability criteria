@@ -1,0 +1,29 @@
+# Spatial Planning & Coastal Protection Criteria
+**Target Area:** Bonny-Andoni, Niger Delta, Nigeria  
+
+## Introduction & Contextual Rationale
+While the PescaMare platform addresses a tropical African coastline (Bonny-Andoni, Nigeria), the integration of European Copernicus data provides a powerful macro-level framework for territorial protection. Global remote sensing assets from Copernicus allow us to monitor large-scale environmental dynamics. This framework translates these satellite parameters into concrete physical planning rules to protect artisanal fishing grounds, mitigate shoreline displacement, and secure local community permanence without deploying commercially aggressive infrastructure.
+
+---
+
+## Core GIS Suitability & Protection Criteria
+
+### 1. Artisanal Fishery Safeguard Zones (Source: Copernicus Marine Service - CMEMS)
+*   **Copernicus Parameters:** Sea Surface Temperature (SST), Chlorophyll-a concentration, and Marine Turbidity.
+*   **Planning Logic:** These parameters identify high-productivity ocean zones where fish stocks naturally cluster. Instead of exploitation, PescaMare uses this data to map **Exclusive Artisanal Sanctuaries**. 
+*   **Protection Rule:** The system establishes territorial boundaries reserved strictly for local community subsistence, creating buffer zones that restrict industrial shipping corridors from encroaching on fragile, high-yield traditional fishing waters.
+
+### 2. Environmental Livelihood Risk Alerts (Source: Copernicus Sentinel-1 Radar Imagery)
+*   **Copernicus Parameters:** SAR (Synthetic Aperture Radar) backscatter signatures for oil spill and chemical pollution detection.
+*   **Planning Logic:** The Niger Delta faces continuous oil pollution that chokes estuarine habitats. Sentinel-1 can detect oil slicks through cloud cover and at night by analyzing sea surface roughness.
+*   **Protection Rule:** The WebGIS integrates an automated **Early-Warning Buffer**. When a spill is detected upstream or offshore, the system calculates the drift towards traditional fishing villages, alerting local custodians to secure their nets and protecting the immediate food supply from chemical contamination.
+
+### 3. Coastal Displacement & Ecosystem-Based Defense (Source: Copernicus Land Monitoring Service & Sentinel-2)
+*   **Copernicus Parameters:** Normalized Difference Vegetation Index (NDVI) for mangrove fringe density and multi-temporal Shoreline Extraction.
+*   **Planning Logic:** Severe shoreline retreat directly threatens the physical safety of coastal fishing settlements. Sentinel-2 imagery tracks annual land loss and the degradation of natural coastal shields.
+*   **Protection Rule:** The system calculates a **Community Vulnerability Index**. It prioritizes remaining natural mangrove fringes for absolute statutory protection. The GIS flags zones where shoreline erosion is highest relative to residential houses, directing nature-based conservation efforts exactly where they act as a "green sponge" to stabilize the physical territory.
+
+---
+
+## System Integration Note for UI/UX (Feedback for Yugesh)
+From a planning perspective, the frontend should not present these layers as commercial zoning. Instead, they must be displayed as **Conservation & Livelihood Toggles**. The user (planners, local authorities, or eco-focused entities) should be able to see the live intersection between environmental risk (oil/erosion) and community presence, allowing for rapid, data-backed protection workflows.
