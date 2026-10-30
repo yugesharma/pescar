@@ -39,6 +39,7 @@ const color = (prop: string) => ['interpolate', ['linear'], ['get', prop], ...ST
 const VIEWS: Record<'azores' | 'europe', { center: [number, number]; zoom: number }> = {
   azores: { center: [-28, 38.4], zoom: 6.3 }, europe: { center: [12, 50], zoom: 3.4 },
 }
+const PHONE = matchMedia('(max-width: 768px)').matches  // layers card starts collapsed on phones
 const TOP = 100  // Europe list length; the map shows every harbour
 // Range tool: centre, cursor or pinned target. Kept in a ref because map handlers are registered once.
 type Range = { on: boolean; center?: LngLat; target?: LngLat; pinned: boolean }
@@ -55,16 +56,33 @@ const pct = (v: number) => `${Math.round(v * 100)}%`
 const EMODNET = 'https://ows.emodnet-humanactivities.eu/wms?service=WMS&version=1.1.1&layers=emodnet:fishingstaticgears'
 const PRESSURE_TILES = `${EMODNET}&request=GetMap&styles=&format=image/png&transparent=true&srs=EPSG:3857&width=256&height=256`
   + `&bbox={bbox-epsg-3857}&CQL_FILTER=${encodeURIComponent("fo_year=2025 OR (ecoregn='Celtic Seas' AND fo_year=2024)")}`
-const PRESSURE_LEGEND = `${EMODNET.replace('layers=', 'layer=')}&request=GetLegendGraphic&format=image/png`
+const PRESSURE_LEGEND = `${EMODNET.replace('layers=', 'layer=')}&request=GetLegendGraphic&format=application/json`
+// Legends drawn in the app's own style: colours low -> high, ticks at 0-1 along the bar.
+type Ramp = { colours: string[]; stepped?: boolean; ticks: [number, string][] }
+const SCORE_RAMP: Ramp = { colours: STOPS.map(s => s[1]), ticks: STOPS.map(([v]) => [v, fmt(v)]) }
+async function emodnetRamp(): Promise<Ramp> {  // 10 classes; label every other upper bound
+  const rules: { title: string; symbolizers: { Polygon: { fill: string } }[] }[] = (await (await fetch(PRESSURE_LEGEND)).json()).Legend[0].rules
+  return { stepped: true, colours: rules.map(r => r.symbolizers[0].Polygon.fill),
+    ticks: [[0, '0'], ...rules.flatMap((r, i) => i % 2 ? [] : [[(i + 1) / rules.length, r.title.split('<=')[1]?.trim()] as [number, string]])] }
+}
+async function cmemsRamp(url: string): Promise<Ramp> {  // the legend SVG is a vertical bar, max at the top
+  const svg = new DOMParser().parseFromString(await (await fetch(url)).text(), 'image/svg+xml')
+  const stops = [...svg.querySelectorAll('stop')].map(s => s.getAttribute('stop-color')!).reverse()
+  const h = +svg.querySelector('rect.colorbar')!.getAttribute('height')!
+  const ticks = [...svg.querySelectorAll('.scale text')].map(t => [1 - +t.getAttribute('y')! / h, t.textContent!] as [number, string])
+    .sort((a, b) => a[0] - b[0])
+  const every = Math.ceil(ticks.length / 5)
+  return { colours: stops.filter((_, i) => i % 16 === 0 || i === stops.length - 1), ticks: ticks.filter((_, i) => i % every === 0) }
+}
 // Copernicus Marine WMTS, live. Each layer shows its dataset's default time (the step nearest now), read from the
 // dataset's own capabilities so the tiles and the label agree. Colour ranges chosen with the user.
 const CMEMS = 'https://wmts.marine.copernicus.eu/teroWmts'
 const OCEAN = [
-  { id: 'chl', name: 'Chlorophyll', style: 'cmap:algae,logScale,range:0.05/2',
+  { id: 'chl', name: 'Chlorophyll', unit: 'mg/m³', style: 'cmap:algae,logScale,range:0.05/2',
     layer: 'OCEANCOLOUR_GLO_BGC_L4_NRT_009_102/cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-multi-4km_P1D_202311/CHL' },
-  { id: 'thetao', name: 'Sea temperature', style: 'cmap:thermal',
+  { id: 'thetao', name: 'Sea temperature', unit: '°C', style: 'cmap:thermal',
     layer: 'GLOBAL_ANALYSISFORECAST_PHY_001_024/cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m_202406/thetao' },
-  { id: 'waves', name: 'Wave height', style: 'cmap:amp,range:0/4', hourly: true,
+  { id: 'waves', name: 'Wave height', unit: 'm', style: 'cmap:amp,range:0/4', hourly: true,
     layer: 'GLOBAL_ANALYSISFORECAST_WAV_001_027/cmems_mod_glo_wav_anfc_0.083deg_PT3H-i_202411/VHM0' },
 ]
 // Dark vessels: GFW radar detections without AIS, dot area ∝ detections per 0.1° cell. Amber passes the palette
@@ -99,6 +117,8 @@ export default function App() {
   const [times, setTimes] = useState<Record<string, string>>({})
   const [dark, setDark] = useState(false)
   const [darkDates, setDarkDates] = useState<string>()
+  const [ramps, setRamps] = useState<Record<string, Ramp>>({})
+  const asked = useRef(new Set<string>())  // legends already requested
   const [ranging, setRanging] = useState(false)
   const [label, setLabel] = useState<Label>()
   const rng = useRef<Range>({ on: false, pinned: false })
@@ -245,6 +265,15 @@ export default function App() {
     })
     m.setLayoutProperty('dark', 'visibility', dark ? 'visible' : 'none')
   }, [dark, darkDates])
+  useEffect(() => {  // legends: fetched the first time a layer is switched on
+    const want = [...(pressure ? ['pressure'] : []), ...OCEAN.filter(o => ocean[o.id]).map(o => o.id)].filter(id => !asked.current.has(id))
+    for (const id of want) {
+      asked.current.add(id)
+      const o = OCEAN.find(x => x.id === id)
+      ;(o ? cmemsRamp(`${oceanQuery(o)}&REQUEST=GetLegend&FORMAT=${encodeURIComponent('image/svg+xml')}`) : emodnetRamp())
+        .then(r => setRamps(v => ({ ...v, [id]: r })), () => asked.current.delete(id))
+    }
+  }, [pressure, ocean])
   useEffect(() => {
     for (const o of OCEAN) latestTime(o.layer).then(t => t && setTimes(v => ({ ...v, [o.id]: t })))
   }, [])
@@ -265,26 +294,64 @@ export default function App() {
   const europe = scope.cc === 'europe'
   const shown = europe ? inView.slice(0, TOP) : inView
   const rankOf = new Map(all.map((x, i) => [x.code, i + 1]))
+  const sel = all.find(x => x.code === code)  // the panel heading: harbour, else the country
+
+  const oceanTime = (o: typeof OCEAN[number]) => times[o.id] && (o.hourly ? `${times[o.id].slice(0, 16).replace('T', ' ')} UTC` : times[o.id].slice(0, 10))
+  const toggle = (on: boolean, set: (v: boolean) => void, name: string) =>
+    <label><input type="checkbox" checked={on} onChange={e => set(e.target.checked)} /> {name}</label>
 
   return (
     <div className="app">
       <div className="map-wrap">
-        <div className="map" ref={mapEl} />
-        <button className="range-btn" aria-pressed={ranging} onClick={() => setRanging(v => !v)}
-          title="Range and bearing (R). Click a centre, then a target; Esc to leave.">
-          ⌖ Range & bearing{ranging && (!rng.current.center || rng.current.pinned ? ' · click a centre' : ' · click to pin')}
-        </button>
-        {label && <div className="range-label" style={{ left: label.x, top: label.y }}>
-          <b>{label.text}</b>
-        </div>}
+        <div className="map-area">
+          <div className="map" ref={mapEl} />
+          <div className="overlay top-left">
+            <button className="range-btn" aria-pressed={ranging} onClick={() => setRanging(v => !v)}
+              title="Range and bearing (R). Click a centre, then a target; Esc to leave.">
+              ⌖ Range & bearing{ranging && (!rng.current.center || rng.current.pinned ? ' · click a centre' : ' · click to pin')}
+            </button>
+            <details className="card layers" open={!PHONE}>
+              <summary>Map layers</summary>
+              {toggle(pressure, setPressure, 'Fishing intensity')}
+              {toggle(fronts, setFronts, 'Fish fronts')}
+              {toggle(dark, setDark, 'Dark vessels')}
+              {OCEAN.map(o => <div key={o.id}>{toggle(!!ocean[o.id], v => setOcean(s => ({ ...s, [o.id]: v })), o.name)}</div>)}
+            </details>
+          </div>
+          {label && <div className="range-label" style={{ left: label.x, top: label.y }}><b>{label.text}</b></div>}
+          {view === 'explore' && h?.species.some(s => s.share !== null) && <SpeciesCard key={h.code} h={h} />}
+          <div className="overlay bottom-left card legend-stack">
+            <LegendItem title="Harbour score" source="Dark ring: pilot harbour (full score). Others: partial score.">
+              <RampLegend r={SCORE_RAMP} />
+            </LegendItem>
+            {pressure && <LegendItem title="Fishing intensity, static gears" unit="avg. MW fishing hours per 0.05° cell" source="EMODnet, ICES">
+              {ramps.pressure ? <RampLegend r={ramps.pressure} /> : <p className="muted">Loading…</p>}
+            </LegendItem>}
+            {fronts && <LegendItem title="Fish fronts, sea temperature × chlorophyll" source={data?.meta.fronts_dates}>
+              <div className="key"><span className="swatch" style={{ background: 'rgb(214,40,40)' }} /> temperature front</div>
+              <div className="key"><span className="swatch" style={{ background: 'rgb(13,148,136)' }} /> front head-on with chlorophyll (upwelling)</div>
+            </LegendItem>}
+            {dark && <LegendItem title="Dark vessels, radar detections without AIS" unit="detections per 0.1° cell"
+              source={`Global Fishing Watch${darkDates ? `, ${darkDates}` : ''} · not evidence of illegal activity`}>
+              <div className="key">{DARK_KEY.map(n => { const r = 3 + 7 * (Math.sqrt(n) - 1) / 6; return <span key={n} className="dot">
+                <svg width={2 * r + 2} height={2 * r + 2}><circle cx={r + 1} cy={r + 1} r={r} fill={DARK} stroke="#fff" /></svg>{n}</span> })}</div>
+            </LegendItem>}
+            {OCEAN.filter(o => ocean[o.id]).map(o => <LegendItem key={o.id} title={o.name} unit={o.unit}
+              source={`Copernicus Marine${oceanTime(o) ? `, ${oceanTime(o)}` : ''}`}>
+              {ramps[o.id] ? <RampLegend r={ramps[o.id]} /> : <p className="muted">Loading…</p>}
+            </LegendItem>)}
+          </div>
+        </div>
+        {view === 'explore' && h && <InvestDrawer key={h.code} h={h} limit={limit} onSaved={() => setRev(r => r + 1)} />}
       </div>
       <aside className="panel">
-        <h1>PescaMare</h1>
+        {sel ? <><h1>{sel.name}</h1><p className="muted subtitle">{sel.code} · {sel.region_name}, {countryName.of(sel.cc)}</p></>
+          : <><h1>{europe ? 'All Europe' : countryName.of(scope.cc)}</h1>
+            {scope.region && <p className="muted subtitle">{regionNames.get(scope.region)}</p>}</>}
         <div className="tabs" role="tablist">{(['explore', 'monitor'] as const).map(v =>
           <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)}>{v[0].toUpperCase() + v.slice(1)}</button>)}
         </div>
-        {view === 'monitor' ? <Monitor limit={limit} onOpen={code => {
-          const s = all.find(x => x.code === code); setView('explore'); if (s) select(s) }} /> : <>
+        {view === 'monitor' ? <Monitor limit={limit} code={code} onPick={c => { const s = all.find(x => x.code === c); if (s) select(s) }} /> : <>
         <div className="controls">
         <label className="muted scope">Country{' '}
           <select value={scope.cc} onChange={e => changeScope({ cc: e.target.value, region: '' })}>
@@ -304,38 +371,8 @@ export default function App() {
           </select>
         </label>
         </div>
-        <fieldset className="layers"><legend>Map layers</legend>
-        <label className="muted scope"><input type="checkbox" checked={pressure} onChange={e => setPressure(e.target.checked)} />{' '}
-          Fishing intensity, static gears (EMODnet)</label>
-        {pressure && <img height={150} src={PRESSURE_LEGEND} alt="Legend: average MW fishing hours per 0.05° cell" />}
-        <label className="muted scope"><input type="checkbox" checked={fronts} onChange={e => setFronts(e.target.checked)} />{' '}
-          Fish fronts, sea temperature × chlorophyll{data && ` (${data.meta.fronts_dates})`}</label>
-        {fronts && <p className="muted">
-          <span className="swatch" style={{ background: 'rgb(214,40,40)' }} /> temperature front{' '}
-          <span className="swatch" style={{ background: 'rgb(13,148,136)' }} /> front head-on with chlorophyll (upwelling)
-        </p>}
-        <label className="muted scope"><input type="checkbox" checked={dark} onChange={e => setDark(e.target.checked)} />{' '}
-          Dark vessels, radar detections without AIS (Global Fishing Watch{darkDates && `, ${darkDates}`})</label>
-        {dark && <p className="muted">
-          {DARK_KEY.map(n => { const r = 3 + 7 * (Math.sqrt(n) - 1) / 6; return <span key={n}>
-            <svg width={2 * r + 2} height={2 * r + 2} style={{ verticalAlign: 'middle' }}><circle cx={r + 1} cy={r + 1} r={r} fill={DARK} /></svg>
-            {' '}{n}{' '}</span> })}
-          detections per 0.1° cell · not evidence of illegal activity
-        </p>}
-        {OCEAN.map(o => <div key={o.id}>
-          <label className="muted scope"><input type="checkbox" checked={!!ocean[o.id]}
-            onChange={e => setOcean(v => ({ ...v, [o.id]: e.target.checked }))} />{' '}
-            {o.name} (Copernicus Marine{times[o.id] && `, ${o.hourly ? `${times[o.id].slice(0, 16).replace('T', ' ')} UTC` : times[o.id].slice(0, 10)}`})</label>
-          {ocean[o.id] && <img height={220} alt={`Legend: ${o.name}`}
-            src={`${oceanQuery(o)}&REQUEST=GetLegend&FORMAT=${encodeURIComponent('image/svg+xml')}`} />}
-        </div>)}
-        </fieldset>
 
-        {code ? (h ? <Detail h={h} limit={limit} onBack={() => setCode(undefined)} onSaved={() => setRev(r => r + 1)} /> : <p className="muted">Loading…</p>) : <>
-          <h2>Harbour score</h2>
-          <div className="legend" style={{ background: `linear-gradient(to right, ${STOPS.map(s => s[1]).join()})` }} />
-          <div className="legend-labels muted">{STOPS.map(([v]) => <span key={v}>{fmt(v)}</span>)}</div>
-          <p className="muted">Dark ring: pilot harbour (full score). Others: partial score.</p>
+        {code ? (h ? <Detail h={h} limit={limit} onBack={() => setCode(undefined)} /> : <p className="muted">Loading…</p>) : <>
           {data && <p className="muted">{europe ? `Top ${TOP} of ${all.length}` : `${inView.length} harbours · # = rank in Europe`}</p>}
           <ol className="ranked">{shown.map((x, i) => (
             <li key={x.code}><button onClick={() => select(x)}>
@@ -357,6 +394,24 @@ export default function App() {
   )
 }
 
+function LegendItem({ title, unit, source, children }: { title: string; unit?: string; source?: string; children: React.ReactNode }) {
+  return <div className="legend-item">
+    <div className="legend-title">{title}{unit && <span className="muted"> · {unit}</span>}</div>
+    {children}
+    {source && <div className="muted">{source}</div>}
+  </div>
+}
+
+function RampLegend({ r }: { r: Ramp }) {
+  const n = r.colours.length
+  const bg = r.stepped ? r.colours.map((c, i) => `${c} ${(i / n) * 100}% ${((i + 1) / n) * 100}%`).join() : r.colours.join()
+  return <div className="ramp" role="img" aria-label={`Colour scale ${r.ticks.map(t => t[1]).join(', ')}`}>
+    <div className="legend" style={{ background: `linear-gradient(to right, ${bg})` }} />
+    <div className="ticks">{r.ticks.map(([at, t]) => <span key={t} style={{ left: `${at * 100}%`,
+      transform: `translateX(${at < 0.05 ? 0 : at > 0.95 ? -100 : -50}%)` }}>{t}</span>)}</div>
+  </div>
+}
+
 function showHarbours(m: maplibregl.Map, harbours: Summary[]) {
   for (const [source, pilot] of [['harbours', 0], ['pilot', 1]] as const) {
     (m.getSource(source) as maplibregl.GeoJSONSource).setData({
@@ -369,17 +424,18 @@ function showHarbours(m: maplibregl.Map, harbours: Summary[]) {
   }
 }
 
-function Factor({ name, value, note }: { name: string; value?: number; note: string }) {
+function Factor({ name, value, note }: { name: string; value?: number; note?: string }) {
   return <div className="factor">
     <div className="factor-head"><span>{name}</span><span>{value === undefined ? '–' : fmt(value)}</span></div>
     <div className="track">{value !== undefined && <div className="fill" style={{ width: `${value * 100}%` }} />}</div>
-    <div className="muted">{note}</div>
+    {note && <div className="muted">{note}</div>}
   </div>
 }
 
-function Detail({ h, limit, onBack, onSaved }: { h: Harbour; limit: number; onBack: () => void; onSaved: () => void }) {
+const capRange = (h: Harbour) => `${Math.min(...h.weekly.map(w => w.trip_cap!))}–${Math.max(...h.weekly.map(w => w.trip_cap!))}`
+
+function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () => void }) {
   return <>
-    <h2>{h.name} <span className="muted">{h.code}</span></h2>
     <button className="btn" onClick={onBack}>← All harbours</button>
     {h.cell_km > FAR_KM && <p className="warning">⚠ Wave model cell {h.cell_km} km away</p>}
     {h.coords === 'GeoNames' && <p className="warning">⚠ Location from GeoNames name match</p>}
@@ -398,8 +454,7 @@ function Detail({ h, limit, onBack, onSaved }: { h: Harbour; limit: number; onBa
     <Factor name="Headroom" value={h.headroom ?? undefined} note={h.fishing_hours === null
       ? 'pilot harbours only'
       : `${Math.round(h.fishing_hours)} AIS fishing hours / year within 6 nm · stock penalty ${fmt(h.stock_penalty!)}`} />
-    {h.headroom !== null && <p className="muted">Trip cap per licensed boat:{' '}
-      {Math.min(...h.weekly.map(w => w.trip_cap!))}–{Math.max(...h.weekly.map(w => w.trip_cap!))} trips / week at {limit.toFixed(1)} m</p>}
+    {h.headroom !== null && <p className="muted">Trip cap per licensed boat: {capRange(h)} trips / week at {limit.toFixed(1)} m</p>}
     <h2>Waves at {limit.toFixed(1)} m</h2>
     <div className="stats">
       <div><b>{Math.round(h.viable_days)}</b><span className="muted">viable days / year</span></div>
@@ -408,18 +463,6 @@ function Detail({ h, limit, onBack, onSaved }: { h: Harbour; limit: number; onBa
     <h2>Season curve</h2>
     <p className="muted">Share of viable days by week of the year at {limit.toFixed(1)} m. Shaded: shoulder season.</p>
     <SeasonCurve key={`${h.code}-${limit}`} weekly={h.weekly} />
-    {h.species.some(s => s.share !== null) && <>
-      <h2>Species</h2>
-      <table><tbody>{h.species.map(s => (
-        <tr key={s.name}>
-          <td><span title={s.scientific}>{s.name}</span>{s.target ? <span className="muted"> · target</span> : ''}<br />
-            <span className="muted">{s.source}{s.year ? `, ${s.year}` : ''}</span></td>
-          <td className="muted" style={{ whiteSpace: 'nowrap', padding: '0 8px' }}>{s.share === null ? '' : `${pct(s.share)} habitat`}</td>
-          <td><span className={`status ${s.status}`}>{s.status}</span></td>
-        </tr>))}
-      </tbody></table>
-    </>}
-    <Invest key={h.code} h={h} limit={limit} onSaved={onSaved} />
     {h.trips.length > 0 && <h2>Next 3 days</h2>}
     <table><tbody>{h.trips.map(t => (
       <tr key={t.date}>
@@ -429,6 +472,24 @@ function Detail({ h, limit, onBack, onSaved }: { h: Harbour; limit: number; onBa
       </tr>))}
     </tbody></table>
   </>
+}
+
+const stockCounts = (h: Harbour) => (['Overfished', 'Healthy', 'Unknown'] as const)
+  .map(s => [s, h.species.filter(x => x.status === s).length] as const).filter(([, n]) => n)
+
+function SpeciesCard({ h }: { h: Harbour }) {
+  const over = h.species.filter(s => s.status === 'Overfished').length
+  return <details className="overlay top-right card species">
+    <summary>Species · {h.name} · {h.species.length}{over ? ` · ${over} overfished` : ''}</summary>
+    <table><tbody>{h.species.map(s => (
+      <tr key={s.name}>
+        <td><span title={s.scientific}>{s.name}</span>{s.target ? <span className="muted"> · target</span> : ''}<br />
+          <span className="muted">{s.source}{s.year ? `, ${s.year}` : ''}</span></td>
+        <td className="muted" style={{ whiteSpace: 'nowrap', padding: '6px 8px' }}>{s.share === null ? '' : `${pct(s.share)} habitat`}</td>
+        <td><span className={`status ${s.status}`}>{s.status}</span></td>
+      </tr>))}
+    </tbody></table>
+  </details>
 }
 
 const eur = (v: number) => `€${Math.round(v).toLocaleString('en-GB')}`
@@ -448,7 +509,8 @@ async function post(url: string, body: object) {
 
 const FIELDS = [['boats', 'Boats to license'], ['training', 'Training places'], ['budget', 'Budget (€)'], ['target', 'Target trips / week']] as const
 
-function Invest({ h, limit, onSaved }: { h: Harbour; limit: number; onSaved: () => void }) {
+// Bottom drawer: the Explore facts needed to decide | proposal form and list | cap check and validation.
+function InvestDrawer({ h, limit, onSaved }: { h: Harbour; limit: number; onSaved: () => void }) {
   const [form, setForm] = useState({ boats: 2, training: 4, budget: 50000, target: 6, notes: '' })
   const [error, setError] = useState<string>()
   const [picked, setPicked] = useState<number>()
@@ -456,61 +518,96 @@ function Invest({ h, limit, onSaved }: { h: Harbour; limit: number; onSaved: () 
   const shown = h.proposals.find(p => p.id === picked) ?? h.proposals[0]
   const [vBoats, setVBoats] = useState<number>()
   const save = (url: string, body: object) => post(url, body).then(() => { setError(undefined); onSaved() }, e => setError(e.message))
-  return <>
-    <h2>Invest <span className={`status ${h.state}`}>{h.state}</span></h2>
-    <form className="invest" onSubmit={e => { e.preventDefault(); save(`/api/harbours/${h.code}/proposals`, form) }}>
-      {FIELDS.map(([k, name]) => <label key={k} className="muted">{name}
-        <input type="number" min={k === 'boats' ? 1 : 0} required value={form[k]} onChange={e => setForm({ ...form, [k]: +e.target.value })} />
-      </label>)}
-      <label className="muted wide">Notes<textarea rows={2} maxLength={2000} value={form.notes}
-        onChange={e => setForm({ ...form, notes: e.target.value })} /></label>
-      <p className="muted wide">Projected income {eur(h.income * form.boats)} / year vs budget {eur(form.budget)}</p>
-      <button className="wide btn primary">Save proposal</button>
-    </form>
-    {error && <p className="warning">⚠ {error}</p>}
-    {h.proposals.length > 0 && <>
-      <h2>Proposals</h2>
-      <table className="proposals"><tbody>{h.proposals.map(p => (
-        <tr key={p.id} className={p === shown ? 'picked' : ''} tabIndex={0}
-          onClick={() => setPicked(p.id)} onKeyDown={e => e.key === 'Enter' && setPicked(p.id)}>
-          <td>{dayMonth(p.created)}<br /><span className="muted">{p.boats} boats · {p.training} training · {p.target} trips/wk</span>
-            {p.notes && <><br /><span className="muted">{p.notes}</span></>}</td>
-          <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{eur(p.budget)}<br /><span className="muted">{eur(p.income)} / yr</span></td>
-          <td>{p.caps[0] === null ? <span className="muted">no cap</span>
-            : p.over_weeks.length ? <span className="status over">⚠ {p.over_weeks.length} wk</span>
-            : <span className="status Healthy">✓ cap</span>}</td>
-        </tr>))}
-      </tbody></table>
-      {shown.caps[0] === null ? <p className="muted">Trip cap: pilot harbours only</p> : <>
-        <p className={shown.over_weeks.length ? 'warning' : 'muted'}>{shown.over_weeks.length
-          ? `⚠ ${shown.target} trips / week is over the cap in ${shown.over_weeks.length} weeks: ${runs(shown.over_weeks)}`
-          : `${shown.target} trips / week is within the cap every week`} ({shown.boats} boats, {limit.toFixed(1)} m)</p>
-        <CapChart key={shown.id} weekly={h.weekly} p={shown} />
-      </>}
-      {h.validation ? <p>Validated {dayMonth(h.validation.date)} {h.validation.date.slice(0, 4)} · {h.validation.boats} licensed boats</p>
-        : <form className="invest" onSubmit={e => { e.preventDefault()
-          save(`/api/harbours/${h.code}/validation`, { date: vDate, boats: vBoats ?? shown.boats }) }}>
-          <label className="muted">Validation date<input type="date" required value={vDate} onChange={e => setVDate(e.target.value)} /></label>
-          <label className="muted">Licensed boats<input type="number" min={1} required value={vBoats ?? shown.boats}
-            onChange={e => setVBoats(+e.target.value)} /></label>
-          <button className="wide btn primary">Mark Validated</button>
-        </form>}
-    </>}
-  </>
+  const n = h.proposals.length
+  return <details className="drawer">
+    <summary>Invest · {h.name} <span className={`status ${h.state}`}>{h.state}</span>
+      <span className="muted">{n} proposal{n === 1 ? '' : 's'}</span></summary>
+    <div className="drawer-body">
+      <section>
+        <h3>{h.name} at {limit.toFixed(1)} m</h3>
+        <div className="stats">
+          <div><b>{fmt(h.score)}</b><span className="muted">{h.pilot ? 'harbour score' : 'partial score'} · #{h.rank} of {h.of}</span></div>
+          <div><b>{eur(h.income)}</b><span className="muted">income potential per boat / year</span></div>
+          <div><b>{Math.round(h.viable_days)}</b><span className="muted">viable days / year</span></div>
+          <div><b>{Math.round(h.shoulder_days)}</b><span className="muted">in shoulder season (of 152)</span></div>
+        </div>
+        <p><strong>{h.limiting[0].toUpperCase() + h.limiting.slice(1)}</strong></p>
+        <Factor name="Community" value={h.community} />
+        <Factor name="Viability" value={h.viability} />
+        <Factor name="Attractiveness" value={h.attractiveness ?? undefined} />
+        <Factor name="Headroom" value={h.headroom ?? undefined} />
+        {h.headroom !== null && <p className="muted">Trip cap per licensed boat: {capRange(h)} trips / week · stock penalty {fmt(h.stock_penalty!)}</p>}
+        {h.species.length > 0 && <p className="muted">Species: {stockCounts(h).map(([s, k]) =>
+          <span key={s}><span className={`status ${s}`}>{k} {s}</span> </span>)}</p>}
+        <SeasonCurve key={`${h.code}-${limit}`} weekly={h.weekly} />
+      </section>
+      <section>
+        <h3>Proposal</h3>
+        <form className="invest" onSubmit={e => { e.preventDefault(); save(`/api/harbours/${h.code}/proposals`, form) }}>
+          {FIELDS.map(([k, name]) => <label key={k} className="muted">{name}
+            <input type="number" min={k === 'boats' ? 1 : 0} required value={form[k]} onChange={e => setForm({ ...form, [k]: +e.target.value })} />
+          </label>)}
+          <label className="muted wide">Notes<textarea rows={2} maxLength={2000} value={form.notes}
+            onChange={e => setForm({ ...form, notes: e.target.value })} /></label>
+          <p className="muted wide">Projected income {eur(h.income * form.boats)} / year vs budget {eur(form.budget)}</p>
+          <button className="wide btn primary">Save proposal</button>
+        </form>
+        {error && <p className="warning">⚠ {error}</p>}
+        {n > 0 && <table className="proposals"><tbody>{h.proposals.map(p => (
+          <tr key={p.id} className={p === shown ? 'picked' : ''} tabIndex={0}
+            onClick={() => setPicked(p.id)} onKeyDown={e => e.key === 'Enter' && setPicked(p.id)}>
+            <td>{dayMonth(p.created)}<br /><span className="muted">{p.boats} boats · {p.training} training · {p.target} trips/wk</span>
+              {p.notes && <><br /><span className="muted">{p.notes}</span></>}</td>
+            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{eur(p.budget)}<br /><span className="muted">{eur(p.income)} / yr</span></td>
+            <td>{p.caps[0] === null ? <span className="muted">no cap</span>
+              : p.over_weeks.length ? <span className="status over">⚠ {p.over_weeks.length} wk</span>
+              : <span className="status Healthy">✓ cap</span>}</td>
+          </tr>))}
+        </tbody></table>}
+      </section>
+      <section>
+        <h3>Cap check</h3>
+        {!shown ? <p className="muted">Save a proposal to check it against the trip cap.</p> : <>
+          {shown.caps[0] === null ? <p className="muted">Trip cap: pilot harbours only</p> : <>
+            <p className={shown.over_weeks.length ? 'warning' : 'muted'}>{shown.over_weeks.length
+              ? `⚠ ${shown.target} trips / week is over the cap in ${shown.over_weeks.length} weeks: ${runs(shown.over_weeks)}`
+              : `${shown.target} trips / week is within the cap every week`} ({shown.boats} boats, {limit.toFixed(1)} m)</p>
+            <CapChart key={shown.id} weekly={h.weekly} p={shown} />
+          </>}
+          {h.validation ? <p>Validated {dayMonth(h.validation.date)} {h.validation.date.slice(0, 4)} · {h.validation.boats} licensed boats</p>
+            : <form className="invest" onSubmit={e => { e.preventDefault()
+              save(`/api/harbours/${h.code}/validation`, { date: vDate, boats: vBoats ?? shown.boats }) }}>
+              <label className="muted">Validation date<input type="date" required value={vDate} onChange={e => setVDate(e.target.value)} /></label>
+              <label className="muted">Licensed boats<input type="number" min={1} required value={vBoats ?? shown.boats}
+                onChange={e => setVBoats(+e.target.value)} /></label>
+              <button className="wide btn primary">Mark Validated</button>
+            </form>}
+        </>}
+      </section>
+    </div>
+  </details>
 }
 
 const INK = '#1f1f1e', OVER = '#fff4dc'
 const TRIPS = BLUE, OVER_BAR = '#eb6834', ADDED = '#eb6834'  // palette slots 1 and 2
 
-function Monitor({ limit, onOpen }: { limit: number; onOpen: (code: string) => void }) {
+// One harbour at a time: the selected one if it is watched, else a pick list of watched harbours.
+function Monitor({ limit, code, onPick }: { limit: number; code?: string; onPick: (code: string) => void }) {
   const [list, setList] = useState<Watched[]>()
   const [rev, setRev] = useState(0)
   useEffect(() => { fetch(`/api/monitor?limit=${limit}`).then(r => r.json()).then(d => setList(d.harbours)) }, [limit, rev])
   if (!list) return <p className="muted">Loading…</p>
   if (!list.length) return <p className="muted">No Validated harbours yet. Validate one from its Invest section.</p>
-  return <>{list.map(w => <section key={w.code} className="watched">
-    <h2><button className="link" onClick={() => onOpen(w.code)}>{w.name}</button>{' '}
-      <span className={`status ${w.state}`}>{w.state}</span>{w.demo && <span className="demo">demo data</span>}</h2>
+  const w = list.find(x => x.code === code)
+  if (!w) return <>
+    <p className="muted">Pick a Validated harbour:</p>
+    <ol className="ranked">{list.map(x => <li key={x.code}><button onClick={() => onPick(x.code)}>
+      <span className="grow">{x.name}</span>
+      <span><span className={`status ${x.state}`}>{x.state}</span>{x.demo && <span className="demo">demo data</span>}</span>
+    </button></li>)}</ol>
+  </>
+  return <section className="watched">
+    <p><span className={`status ${w.state}`}>{w.state}</span>{w.demo && <span className="demo">demo data</span>}</p>
     <p className="muted">Validated {dayMonth(w.validated)} {w.validated.slice(0, 4)} · {w.boats} licensed boats</p>
     <div className="stats">
       <div><b>{w.trips}</b><span className="muted">trips made</span></div>
@@ -529,7 +626,9 @@ function Monitor({ limit, onOpen }: { limit: number; onOpen: (code: string) => v
       <WeekBars weekly={w.weekly} />
     </>}
     <TripForm code={w.code} since={w.validated} onSaved={() => setRev(r => r + 1)} />
-  </section>)}</>
+    {list.length > 1 && <p className="muted">Also watched: {list.filter(x => x !== w).map((x, i) => <span key={x.code}>{i ? ', ' : ''}
+      <button className="link" onClick={() => onPick(x.code)}>{x.name}</button></span>)}</p>}
+  </section>
 }
 
 function TripForm({ code, since, onSaved }: { code: string; since: string; onSaved: () => void }) {
