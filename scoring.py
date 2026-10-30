@@ -3,22 +3,26 @@
 Pure, no I/O. Every judgement call lives here.
 Run:  uv run python scoring.py   -> self-check
 """
+import math
 
 
 def score(raw: list[dict]) -> list[dict]:
     """raw: one dict per harbour with code, small_boats, places (accommodation within 10 km),
     transport_km (nearest airport or ferry terminal), viable_days (per year at 1.5 m).
     Returns the same harbours with the factors, score, limiting factor and income added."""
-    def by_best(key):  # divide by the best harbour's value: best = 1, never min-max to zero
-        best = max(h[key] for h in raw) or 1
-        return [h[key] / best for h in raw]
+    def by_best(key, f=lambda v: v):  # divide by the best harbour's value: best = 1, never min-max to zero
+        best = f(max(h[key] for h in raw)) or 1
+        return [f(h[key]) / best for h in raw]
 
     # Judgement: a ferry or airport 10 km away is worth half one next door.
     closeness = [1 / (1 + h["transport_km"] / TRANSPORT_HALF_KM) for h in raw]
     best_c = max(closeness)
     out = []
-    for h, b, p, c, v in zip(raw, by_best("small_boats"), by_best("places"), closeness, by_best("viable_days")):
+    for h, b, p, c, v in zip(raw, by_best("small_boats", math.log1p), by_best("places", math.log1p), closeness, by_best("viable_days")):
         tourism = (p + c / best_c) / 2
+        # Judgement: boats and places to stay count on a log scale. Boats range from 1 to 991
+        # (Finnish registration districts), places from 0 to 941 (Riccione); past a few dozen,
+        # more of either adds little to filling a 6-10 seat boat.
         factors = dict(community=(b + tourism) / 2, viability=v)
         # ponytail: Attractiveness and Headroom join the product in slices 4-5
         product = factors["community"] * factors["viability"]
@@ -43,8 +47,9 @@ def test():
 
     # The best harbour scores 1; the weakest is scaled by the best, never to zero.
     assert (A["community"], A["viability"], A["score"]) == (1, 1, 1), A
-    # B: boats 0.5, tourism (0.5 + 1) / 2 = 0.75 -> community 0.625; viability 0.5.
-    assert (B["community"], B["viability"], B["score"]) == (0.625, 0.5, 0.3125), B
+    # B: boats log(6)/log(11) = 0.7472; places log(51)/log(101) = 0.8519, tourism (0.8519 + 1) / 2
+    # = 0.926 -> community 0.8366; viability 0.5.
+    assert (B["boats_part"], B["tourism_part"], B["community"], B["viability"]) == (0.7472, 0.926, 0.8366, 0.5), B
     assert B["limiting"] == "limited by swell", B
     assert B["income"] == 50_000, B  # 100 viable days x €500 per boat
 

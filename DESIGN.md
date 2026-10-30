@@ -32,6 +32,7 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 1. As a regional fisheries officer, I want a map of all Azorean harbours coloured by harbour score, so that I can see at a glance where pescatourism has most potential.
 1b. As a regional fisheries officer, I want every European harbour on the map with its viability, viable days and Community, so that I can see how the Azores compare with the rest of Europe.
 2. As a regional fisheries officer, I want a ranked list of harbours next to the map, so that I can compare them without clicking each one.
+2b. As a regional fisheries officer, I want to narrow the map and the list to my country and then my NUTS 2 region, so that I can compare the harbours in my jurisdiction.
 3. As a regional fisheries officer, I want to see each harbour's four factors (Community, Viability, Attractiveness, Headroom), so that I understand why a harbour ranks where it does.
 4. As a regional fisheries officer, I want each harbour's limiting factor in plain words (e.g. "limited by winter swell"), so that I know what would have to change for it to rank higher.
 5. As a regional fisheries officer, I want viable days per year and income potential (viable days × €500 per boat), so that I can weigh the economic case.
@@ -71,8 +72,12 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 ### Harbours
 - **Harbours** are EU ports of registration in European waters with at least one licensed vessel under 12 m: 2,341 ports (ADR-0004).
   - French outermost regions (segments `4F*`) are excluded; the Azores, Madeira and the Canaries are kept.
-  - Coordinates: UN/LOCODE first (613 ports), then the port name matched within its country in GeoNames.
+  - Coordinates: UN/LOCODE first (613 ports), then the port name matched within its country in GeoNames (most populous place of that name; harbour words such as "Sadam"/"Hamn" and numbering stripped as a fallback).
+  - Key: the UN/LOCODE where the register uses one; otherwise country + register code (`GR-007`, `IT-00126`), because Greek, Italian, Polish, German and other national codes repeat across countries.
+  - Time zone: that of the nearest GeoNames place.
+  - Region: the NUTS 2 region (Eurostat GISCO 2024, 1:1M) that contains the harbour, or the nearest one in its country for a harbour just off the generalised coastline. The Azores pilot is NUTS 2 region PT20, which holds exactly the 11 pilot harbours.
   - Ports with no sea cell within 20 km are dropped (inland, lake or mismatched); the app reports how many were placed and dropped.
+  - Result (30 Oct 2026): 2,356 ports → 298 without coordinates, 1 outside Europe, 210 with no sea cell within 20 km → **1,847 placed**.
   - A harbour whose model cell is more than ~one grid cell (9 km) away gets a warning in its detail panel.
 - The **pilot harbours** are the **11 Azorean ports of registration**, all with UN/LOCODE coordinates:
   - EU Fleet Register segments `4K9` and `4KA`;
@@ -88,6 +93,8 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
   - The 0.2° reanalysis `cmems_mod_glo_wav_my_0.2deg_PT3H-i` is a check only.
 - The same global 0.083° product is used for every harbour in Europe, so the method and numbers are comparable. Regional products (MED, IBI, NWS, BAL, BLKSEA) are on the roadmap.
 - **Viable day:** every 3-hourly step within 08:00–14:59, in the harbour's own time zone (looked up from its coordinates), is below the wave limit.
+  - A day with no model data is not viable: the model has no waves under sea ice (e.g. Oulu, Dec–Apr).
+  - Europe pull: ~40 min with 16 threads, cached per harbour; later builds refetch only the pilot harbours.
   - Wave limits: 1.0, 1.5 and 2.0 m; 1.5 m is the default.
 - **Outputs:**
   - viability per week of the year;
@@ -100,9 +107,10 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 
 ### Community (F0)
 - Community is the average of two parts, each divided by the best harbour's value:
-  - **Small boats:** under 12 m, `Licence Indicator` = Y.
+  - **Small boats:** under 12 m, `Licence Indicator` = Y, on a log scale: log(1 + boats) ÷ log(1 + best). Counts run from 1 to 991 because some countries register by district (Finland), so a linear scale made almost every harbour "limited by few small boats".
   - **Tourism access:** the number of OpenStreetMap accommodation places within 10 km (hotels, guesthouses, campsites, apartments; OSM rarely records beds), and distance to the nearest airport or ferry terminal. One query per country, counted locally around each harbour; the same method everywhere.
-    - Tourism access = (accommodation places ÷ best harbour's + closeness ÷ best harbour's) / 2, where closeness = 1 / (1 + km / 10): a ferry terminal or airport (OSM `iata`-tagged aerodromes) 10 km away counts half as much as one next door.
+    - Tourism access = (log(1 + places) ÷ log(1 + best harbour's) + closeness ÷ best harbour's) / 2. Places run from 0 to 941 (Riccione), so on a linear scale 78% of harbours scored below 0.1; the raw count is still shown in the app.
+    - Closeness = 1 / (1 + km / 10): a ferry terminal or airport (OSM `iata`-tagged aerodromes) 10 km away counts half as much as one next door.
 - FLAG support is left out until the Azores FLAG is identified.
 
 ### Headroom (F4)
@@ -242,7 +250,9 @@ Each slice goes pipeline → database → API → screen and is verified in the 
 
 ### Known limitations (state them in the pitch)
 - About 4 years of high-resolution wave history. It matches the 40-year record on the coarse grid.
-- The 0.083° grid cannot resolve small coves.
+- The 0.083° grid cannot resolve small coves; 611 of 1,847 harbours are more than 9 km from their model cell.
+- Where the model keeps reporting small waves under sea ice, ice days may count as viable (Baltic winter).
+- 298 ports of registration (13%) could not be placed: names not found in GeoNames.
 - Wave limits are assumptions.
 - Ports of registration are not always where boats work.
 - VMS and AIS miss most boats under 12 m, so fishing pressure is underestimated.

@@ -3,81 +3,168 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { useEffect, useRef, useState } from 'react'
 
 type Trip = { date: string; worst_hs_m: number; status: 'GO' | 'MARGINAL' | 'NO-GO' }
-type Harbour = {
-  code: string; name: string; lat: number; lon: number; cell_km: number
-  viable_days: number; shoulder_days: number
+type Summary = {
+  code: string; name: string; cc: string; region: string; region_name: string; lat: number; lon: number; pilot: number
+  score: number; limiting: string; viable_days: number
+}
+type Harbour = Summary & {
+  cell_km: number; shoulder_days: number; coords: string; rank: number; of: number
   small_boats: number; places: number; transport_km: number; transport: string
-  community: number; boats_part: number; tourism_part: number; viability: number
-  score: number; limiting: string; income: number
+  community: number; boats_part: number; tourism_part: number; viability: number; income: number
   weekly: { week: number; viability: number }[]; trips: Trip[]
 }
-type Data = { limit_m: number; meta: Record<string, string>; harbours: Harbour[] }
+type Data = { limit_m: number; meta: Record<string, string>; harbours: Summary[] }
 
 const LIMITS = [1.0, 1.5, 2.0]
 const FAR_KM = 9  // ~one 0.083° grid cell; closer than this is normal for a coastal harbour
 const BLUE = '#2a78d6'
 // Sequential blue (light -> dark) for harbour score, 0-1 (best harbour in Europe = 1).
 const STOPS: [number, string][] = [[0, '#cde2fb'], [0.33, '#86b6ef'], [0.66, '#256abf'], [1, '#0d366b']]
-const DOT_COLOR = ['interpolate', ['linear'], ['get', 'score'], ...STOPS.flat()] as maplibregl.ExpressionSpecification
+const color = (prop: string) => ['interpolate', ['linear'], ['get', prop], ...STOPS.flat()] as maplibregl.ExpressionSpecification
+const VIEWS: Record<'azores' | 'europe', { center: [number, number]; zoom: number }> = {
+  azores: { center: [-28, 38.4], zoom: 6.3 }, europe: { center: [12, 50], zoom: 3.4 },
+}
+const TOP = 100  // Europe list length; the map shows every harbour
+const countryName = new Intl.DisplayNames(['en'], { type: 'region' })
+// Scope: all of Europe, one country (ISO code), or one NUTS 2 region in it; filters the list and the map.
+type Scope = { cc: string; region: string }  // cc 'europe' = everything; region '' = whole country
+const PILOT: Scope = { cc: 'PT', region: 'PT20' }  // Região Autónoma dos Açores = the 11 pilot harbours
+const inScope = ({ cc, region }: Scope) => (x: Summary) => cc === 'europe' || (x.cc === cc && (!region || x.region === region))
+const counts = <K,>(xs: K[]) => { const m = new Map<K, number>(); for (const x of xs) m.set(x, (m.get(x) ?? 0) + 1); return m }
 const fmt = (v: number) => v.toFixed(2)
 
 export default function App() {
   const [limit, setLimit] = useState(1.5)
   const [data, setData] = useState<Data>()
   const [code, setCode] = useState<string>()
+  const [loaded, setH] = useState<Harbour>()
+  const h = loaded?.code === code ? loaded : undefined  // never show the previous harbour
+  const [scope, setScope] = useState<Scope>(PILOT)
   const mapEl = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map>(null)
-  const dataRef = useRef(data)
-  dataRef.current = data
+  const all = data?.harbours ?? []  // ranked by score
+  const inView = all.filter(inScope(scope))
+  const inViewRef = useRef(inView)
+  inViewRef.current = inView
 
   useEffect(() => {
     fetch(`/api/harbours?limit=${limit}`).then(r => r.json()).then(setData)
   }, [limit])
 
   useEffect(() => {
+    if (code) fetch(`/api/harbours/${code}?limit=${limit}`).then(r => r.json()).then(setH)
+  }, [code, limit])
+
+  const changeScope = (v: Scope) => {
+    setScope(v); setCode(undefined)
+    if (v.cc === 'europe') return map.current?.flyTo({ ...VIEWS.europe })
+    const pts = all.filter(inScope(v))
+    const lons = pts.map(x => x.lon), lats = pts.map(x => x.lat)
+    map.current?.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], { padding: 40, maxZoom: 9 })
+  }
+  const countries = [...counts(all.map(x => x.cc))].map(([cc, n]) => ({ cc, name: countryName.of(cc) ?? cc, n }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const regionNames = new Map(all.map(x => [x.region, x.region_name]))
+  const regions = [...counts(all.filter(x => x.cc === scope.cc).map(x => x.region))]
+    .map(([id, n]) => ({ id, name: regionNames.get(id)!, n })).sort((a, b) => a.name.localeCompare(b.name))
+  const select = (s: Summary) => { setCode(s.code); map.current?.flyTo({ center: [s.lon, s.lat], zoom: Math.max(map.current.getZoom(), 8) }) }
+
+  useEffect(() => {
     const m = new maplibregl.Map({
-      container: mapEl.current!, style: 'https://tiles.openfreemap.org/styles/positron',
-      center: [-28, 38.4], zoom: 6.3,
+      container: mapEl.current!, style: 'https://tiles.openfreemap.org/styles/positron', ...VIEWS.azores,
     })
     m.on('load', () => {
-      m.addSource('harbours', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
-      m.addLayer({
-        id: 'harbours', type: 'circle', source: 'harbours',
-        paint: { 'circle-radius': 9, 'circle-color': DOT_COLOR, 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' },
+      // Clusters below zoom 8; each is coloured by the best harbour score inside it.
+      m.addSource('harbours', {
+        type: 'geojson', data: { type: 'FeatureCollection', features: [] },
+        cluster: true, clusterMaxZoom: 7, clusterRadius: 30, clusterProperties: { best: ['max', ['get', 'score']] },
       })
-      m.on('click', 'harbours', e => setCode(e.features![0].properties.code))
-      m.on('mouseenter', 'harbours', () => (m.getCanvas().style.cursor = 'pointer'))
-      m.on('mouseleave', 'harbours', () => (m.getCanvas().style.cursor = ''))
+      m.addLayer({
+        id: 'clusters', type: 'circle', source: 'harbours', filter: ['has', 'point_count'],
+        paint: {
+          'circle-color': color('best'), 'circle-stroke-width': 2, 'circle-stroke-color': '#fff',
+          'circle-radius': ['step', ['get', 'point_count'], 11, 10, 14, 50, 18],
+        },
+      })
+      m.addLayer({
+        id: 'cluster-count', type: 'symbol', source: 'harbours', filter: ['has', 'point_count'],
+        layout: { 'text-field': '{point_count_abbreviated}', 'text-font': ['Noto Sans Regular'], 'text-size': 11 },
+        paint: { 'text-color': '#1f1f1e', 'text-halo-color': '#fff', 'text-halo-width': 1.5 },
+      })
+      m.addLayer({
+        id: 'harbours', type: 'circle', source: 'harbours', filter: ['!', ['has', 'point_count']],
+        paint: { 'circle-radius': 6, 'circle-color': color('score'), 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' },
+      })
+      // Pilot harbours (full score): never clustered, larger, dark ring, drawn on top.
+      m.addSource('pilot', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+      m.addLayer({
+        id: 'pilot', type: 'circle', source: 'pilot',
+        paint: { 'circle-radius': 9, 'circle-color': color('score'), 'circle-stroke-width': 2, 'circle-stroke-color': '#1f1f1e' },
+      })
+      m.on('click', 'clusters', async e => {
+        const f = e.features![0]
+        const zoom = await (m.getSource('harbours') as maplibregl.GeoJSONSource).getClusterExpansionZoom(f.properties.cluster_id)
+        m.easeTo({ center: (f.geometry as unknown as { coordinates: [number, number] }).coordinates, zoom })
+      })
+      for (const id of ['harbours', 'pilot']) m.on('click', id, e => setCode(e.features![0].properties.code))
+      for (const id of ['harbours', 'pilot', 'clusters']) {
+        m.on('mouseenter', id, () => (m.getCanvas().style.cursor = 'pointer'))
+        m.on('mouseleave', id, () => (m.getCanvas().style.cursor = ''))
+      }
       map.current = m
-      if (dataRef.current) showHarbours(m, dataRef.current)
+      showHarbours(m, inViewRef.current)
     })
     return () => { m.remove(); map.current = null }
   }, [])
 
-  useEffect(() => { if (map.current && data) showHarbours(map.current, data) }, [data])
+  useEffect(() => { if (map.current) showHarbours(map.current, inViewRef.current) }, [data, scope])
 
-  const ranked = [...(data?.harbours ?? [])].sort((a, b) => b.score - a.score)
-  const h = data?.harbours.find(x => x.code === code)
+  const europe = scope.cc === 'europe'
+  const shown = europe ? inView.slice(0, TOP) : inView
+  const rankOf = new Map(all.map((x, i) => [x.code, i + 1]))
 
   return (
     <div className="app">
       <div className="map" ref={mapEl} />
       <aside className="panel">
-        <h1>PescaMare · Azores</h1>
+        <h1>PescaMare</h1>
+        <label className="muted scope">Country{' '}
+          <select value={scope.cc} onChange={e => changeScope({ cc: e.target.value, region: '' })}>
+            <option value="europe">All Europe ({all.length})</option>
+            {countries.map(c => <option key={c.cc} value={c.cc}>{c.name} ({c.n})</option>)}
+          </select>
+        </label>
+        {scope.cc !== 'europe' && <label className="muted scope">Region{' '}
+          <select value={scope.region} onChange={e => changeScope({ ...scope, region: e.target.value })}>
+            <option value="">All of {countryName.of(scope.cc)}</option>
+            {regions.map(r => <option key={r.id} value={r.id}>{r.name} ({r.n}){r.id === PILOT.region ? ' · pilot' : ''}</option>)}
+          </select>
+        </label>}
         <label className="muted">Wave limit{' '}
           <select value={limit} onChange={e => setLimit(+e.target.value)}>
             {LIMITS.map(l => <option key={l} value={l}>{l.toFixed(1)} m</option>)}
           </select>
         </label>
 
-        {h ? <Detail h={h} limit={limit} onBack={() => setCode(undefined)} /> : <>
+        {code ? (h ? <Detail h={h} limit={limit} onBack={() => setCode(undefined)} /> : <p className="muted">Loading…</p>) : <>
           <h2>Harbour score</h2>
           <div className="legend" style={{ background: `linear-gradient(to right, ${STOPS.map(s => s[1]).join()})` }} />
           <div className="legend-labels muted">{STOPS.map(([v]) => <span key={v}>{fmt(v)}</span>)}</div>
-          <p className="muted">Community × Viability so far, each divided by the best harbour. A ranking, not an absolute measure.</p>
-          <ol>{ranked.map(x => (
-            <li key={x.code}><button onClick={() => setCode(x.code)}>
-              <span>{x.name}<br /><span className="muted">{x.limiting}</span></span><span>{fmt(x.score)}</span>
+          <p className="muted">
+            Community × Viability so far, each divided by the best harbour in Europe. A ranking, not an absolute measure.
+            Dark ring: pilot harbour. Outside the pilot this is a <b>partial score</b> until fishing pressure and stock data exist.
+            Grouped dots take the colour of their best harbour.
+          </p>
+          {data && <p className="muted">
+            {europe ? `Top ${TOP} of ${all.length}` : `${inView.length} harbours, ranked within this selection; # = rank in Europe`} ·{' '}
+            {data.meta.harbours_placed} of {data.meta.harbours_ports} ports of registration placed;{' '}
+            {data.meta.harbours_no_coords} without coordinates, {+data.meta.harbours_no_sea_cell + +data.meta.harbours_outside_europe} with no sea cell within 20 km or outside Europe.</p>}
+          <ol className="ranked">{shown.map((x, i) => (
+            <li key={x.code}><button onClick={() => select(x)}>
+              <span className="rank muted">{i + 1}</span>
+              <span className="grow">{x.name}{(europe || !scope.region) && <span className="muted"> · {europe ? x.cc : x.region_name}</span>}<br />
+                <span className="muted">{x.limiting}{!europe && ` · #${rankOf.get(x.code)} in Europe`}</span></span>
+              <span>{fmt(x.score)}</span>
             </button></li>))}
           </ol>
         </>}
@@ -94,14 +181,16 @@ export default function App() {
   )
 }
 
-function showHarbours(m: maplibregl.Map, data: Data) {
-  (m.getSource('harbours') as maplibregl.GeoJSONSource).setData({
-    type: 'FeatureCollection',
-    features: data.harbours.map(h => ({
-      type: 'Feature', geometry: { type: 'Point', coordinates: [h.lon, h.lat] },
-      properties: { code: h.code, score: h.score },
-    })),
-  })
+function showHarbours(m: maplibregl.Map, harbours: Summary[]) {
+  for (const [source, pilot] of [['harbours', 0], ['pilot', 1]] as const) {
+    (m.getSource(source) as maplibregl.GeoJSONSource).setData({
+      type: 'FeatureCollection',
+      features: harbours.filter(h => h.pilot === pilot).map(h => ({
+        type: 'Feature', geometry: { type: 'Point', coordinates: [h.lon, h.lat] },
+        properties: { code: h.code, score: h.score },
+      })),
+    })
+  }
 }
 
 function Factor({ name, value, note }: { name: string; value?: number; note: string }) {
@@ -120,8 +209,9 @@ function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () =>
       ⚠ Wave figures come from the nearest model sea cell, {h.cell_km} km from the harbour.
       Sea state there may differ from the harbour's own waters.
     </p>}
+    {!h.pilot && <p className="muted">Partial score: Community × Viability only. Fishing pressure and stock data are Azores-only for now.</p>}
     <div className="stats">
-      <div><b>{fmt(h.score)}</b><span className="muted">harbour score</span></div>
+      <div><b>{fmt(h.score)}</b><span className="muted">{h.pilot ? 'harbour score' : 'partial score'} · #{h.rank} of {h.of}</span></div>
       <div><b>€{h.income.toLocaleString('en-GB')}</b><span className="muted">income potential per boat / year</span></div>
     </div>
     <p><strong>{h.limiting[0].toUpperCase() + h.limiting.slice(1)}</strong></p>
@@ -140,7 +230,9 @@ function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () =>
     <h2>Season curve</h2>
     <p className="muted">Share of viable days by week of the year at {limit.toFixed(1)} m. ~4 years per week, so single weeks are noisy. Shaded: shoulder season.</p>
     <SeasonCurve key={`${h.code}-${limit}`} weekly={h.weekly} />
+    {h.coords === 'GeoNames' && <p className="muted">Location matched by port name in GeoNames; may be off.</p>}
     <h2>Next 3 days</h2>
+    {!h.trips.length && <p className="muted">Trip status is computed for the pilot harbours only.</p>}
     <table><tbody>{h.trips.map(t => (
       <tr key={t.date}>
         <td>{new Date(t.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })}</td>

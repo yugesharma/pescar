@@ -1,4 +1,4 @@
-"""Community step: small boats (EU Fleet Register) and tourism access (OpenStreetMap).
+"""Community step: tourism access (OpenStreetMap). Small boats are counted with the harbour list (build.py).
 
 Run:  uv run python community.py --test  -> distance self-check, no network
 """
@@ -13,7 +13,6 @@ import pandas as pd
 
 DATA = Path(__file__).parent / "data"
 CACHE = DATA / "cache"            # raw OSM per country; delete a file to refetch
-SMALL_M = 12
 RADIUS_KM = 10
 STAY = {"hotel", "guest_house", "camp_site", "apartment"}
 OVERPASS = "https://overpass-api.de/api/interpreter"
@@ -28,14 +27,6 @@ def km(lat, lon, lats, lons):
     p1, p2 = np.radians(lat), np.radians(lats)
     a = np.sin((p2 - p1) / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(np.radians(lons - lon) / 2) ** 2
     return 6371 * 2 * np.arcsin(np.sqrt(a))
-
-
-def small_boats(codes) -> pd.Series:
-    """Licensed vessels under 12 m per port of registration."""
-    f = pd.read_csv(DATA / "fleet_EU_current.csv", low_memory=False,
-                    usecols=["Place of Registration Code", "LOA (m)", "Licence Indicator"])
-    f = f[(f["LOA (m)"] < SMALL_M) & (f["Licence Indicator"] == "Y")]
-    return f.groupby("Place of Registration Code").size().reindex(codes, fill_value=0)
 
 
 def osm(cc: str) -> pd.DataFrame:
@@ -59,17 +50,15 @@ def osm(cc: str) -> pd.DataFrame:
 
 
 def run(harbours: pd.DataFrame) -> pd.DataFrame:
-    """harbours: code, lat, lon -> code, small_boats, places, transport_km, transport."""
-    boats = small_boats(harbours.code)
+    """harbours: code, cc, lat, lon -> code, places, transport_km, transport."""
     out = []
-    for cc, group in harbours.groupby(harbours.code.str[:2]):  # UN/LOCODE starts with ISO country
+    for cc, group in harbours.groupby("cc"):
         pts = osm(cc)
         stay, move = pts[pts.kind == "stay"], pts[pts.kind != "stay"].reset_index(drop=True)
         for h in group.itertuples():
             d = km(h.lat, h.lon, move.lat.values, move.lon.values)
             i = int(d.argmin())
-            out.append(dict(code=h.code, small_boats=int(boats[h.code]),
-                            places=int((km(h.lat, h.lon, stay.lat.values, stay.lon.values) <= RADIUS_KM).sum()),
+            out.append(dict(code=h.code, places=int((km(h.lat, h.lon, stay.lat.values, stay.lon.values) <= RADIUS_KM).sum()),
                             transport_km=round(float(d[i]), 1),
                             transport=f"{move.kind[i]}: {move.name[i]}".strip(": ")))
     return pd.DataFrame(out)
