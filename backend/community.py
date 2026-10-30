@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-DATA = Path(__file__).parent / "data"
+DATA = Path(__file__).parent.parent / "data"
 CACHE = DATA / "cache"            # raw OSM per country; delete a file to refetch
 RADIUS_KM = 10
 STAY = {"hotel", "guest_house", "camp_site", "apartment"}

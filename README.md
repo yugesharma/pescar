@@ -6,16 +6,26 @@ decisions: [docs/adr/](docs/adr/), background: [pescatourism_project.md](pescato
 
 ## Run
 
-Needs [uv](https://docs.astral.sh/uv/), Node 20+, and a Copernicus Marine login (`uv run copernicusmarine login`).
+Needs [uv](https://docs.astral.sh/uv/), Node 20+, a Copernicus Marine login (`uv run copernicusmarine login`), and a free
+Global Fishing Watch API token ([globalfishingwatch.org/our-apis/tokens](https://globalfishingwatch.org/our-apis/tokens),
+non-commercial use) in `.env` as `GFW_API_KEY=...` (git-ignored); `build.py` uses it for fishing pressure.
 
 ```sh
-uv run python build.py            # write data/pescamare.db: first run ~1 h (waves for ~2,000 harbours,
+cd backend
+uv run python build.py            # write ../data/pescamare.db: first run ~1 h (waves for ~2,000 harbours,
                                   # OSM for 22 countries), then ~2 min (only the 11 pilot harbours refetch)
 uv run uvicorn api:app            # API on :8000
-cd web && npm install && npm run dev   # app on :5173
+cd ../frontend && npm install && npm run dev   # app on :5173, proxies /api to :8000
 ```
 
-Self-checks (no network): `uv run python scoring.py`, and `--test` on `waves.py`, `build.py`, `community.py`.
+Self-checks (no network, from `backend/`): `uv run python scoring.py`, and `--test` on `waves.py`, `build.py`, `community.py`, `pressure.py`.
+
+## Layout
+
+- `backend/`: Python data pipeline (`build.py` and one module per factor), pure scoring (`scoring.py`), API (`api.py`).
+- `frontend/`: React + TypeScript + Vite + MapLibre app.
+- `data/`: inputs and the generated database, shared by both (below).
+- `.env` (root, git-ignored): API tokens.
 
 ## Data in `data/`
 
@@ -27,3 +37,4 @@ Self-checks (no network): `uv run python scoring.py`, and `--test` on `waves.py`
   - `geonames/<CC>.zip`: GeoNames country dumps, to place ports without UN/LOCODE coordinates.
   - `nuts2.geojson`: Eurostat NUTS 2 regions (GISCO 2024, 1:1M).
   - `waves/<code>.json`: wave results per non-pilot harbour (history up to the fetch date).
+  - `gfw_effort_<year>.json`: Global Fishing Watch AIS fishing effort for the pilot box.

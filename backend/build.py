@@ -15,10 +15,11 @@ import numpy as np
 import pandas as pd
 
 import community
+import pressure
 import scoring
 import waves
 
-DATA = Path(__file__).parent / "data"
+DATA = Path(__file__).parent.parent / "data"
 DB = DATA / "pescamare.db"
 GEONAMES = DATA / "cache" / "geonames"         # download.geonames.org/export/dump/<CC>.zip
 NUTS = DATA / "cache" / "nuts2.geojson"
@@ -148,6 +149,8 @@ def main():
     print(counts)
     h = h.merge(placed, on="code")
     h = h.merge(community.run(h), on="code").merge(regions(h), on="code")
+    h = h.merge(pressure.run(h), on="code", how="left")
+    h["fishing_hours"] = h.fishing_hours.astype(object).where(h.fishing_hours.notna(), None)  # None = partial score
     default = w["viable_days"].query("limit_m == 1.5")[["code", "per_year"]]
     h = pd.DataFrame(scoring.score(
         h.merge(default.rename(columns={"per_year": "viable_days"})).to_dict("records"))
@@ -163,6 +166,8 @@ def main():
             pd.Timestamp((community.CACHE / f"osm_{cc}.json").stat().st_mtime, unit="s").strftime(f"{cc} %Y-%m-%d")
             for cc in sorted(h.cc.unique()))),
         ("fleet", "EU Fleet Register, current records"),
+        ("pressure", f"Global Fishing Watch apparent fishing effort (AIS), {pressure.YEAR}, "
+                     f"{pressure.PORT_KM}-{pressure.TRIP_KM:.0f} km from the harbour"),
     ], columns=["key", "value"])
     tmp = DB.with_suffix(".tmp")
     tmp.unlink(missing_ok=True)

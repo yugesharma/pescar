@@ -63,11 +63,11 @@ Habitat suitability for the target species near a harbour: where those fish are 
 _Avoid_: fish abundance, catch potential
 
 **Headroom**:
-How much extra activity the sea near a harbour can take: 1 − local pressure × stock penalty; zero inside no-take zones.
+How much extra activity the sea near a harbour can take: 1 / (1 + fishing hours × stock penalty / 100 h); never zero except inside no-take zones.
 _Avoid_: capacity, sustainability score
 
 **Local pressure**:
-Fishing hours recorded within 6 nm of a harbour, divided by the highest harbour's total.
+AIS fishing hours (Global Fishing Watch) recorded 2 km to 6 nm from a harbour in a year.
 _Avoid_: fishing intensity, effort score
 
 **Stock penalty**:

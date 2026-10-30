@@ -8,7 +8,8 @@ import math
 
 def score(raw: list[dict]) -> list[dict]:
     """raw: one dict per harbour with code, small_boats, places (accommodation within 10 km),
-    transport_km (nearest airport or ferry terminal), viable_days (per year at 1.5 m).
+    transport_km (nearest airport or ferry terminal), viable_days (per year at 1.5 m), and
+    fishing_hours (AIS, 6 nm ring) or None where pressure data does not exist yet (partial score).
     Returns the same harbours with the factors, score, limiting factor and income added."""
     def by_best(key, f=lambda v: v):  # divide by the best harbour's value: best = 1, never min-max to zero
         best = f(max(h[key] for h in raw)) or 1
@@ -24,8 +25,13 @@ def score(raw: list[dict]) -> list[dict]:
         # (Finnish registration districts), places from 0 to 941 (Riccione); past a few dozen,
         # more of either adds little to filling a 6-10 seat boat.
         factors = dict(community=(b + tourism) / 2, viability=v)
-        # ponytail: Attractiveness and Headroom join the product in slices 4-5
-        product = factors["community"] * factors["viability"]
+        if h.get("fishing_hours") is not None:
+            # Judgement: 100 fishing hours a year in the trip area halve Headroom; never zero, and
+            # not relative to the busiest harbour (that would always zero its score).
+            # Stock penalty = 1 until slice 5.
+            factors["headroom"] = 1 / (1 + h["fishing_hours"] / HEADROOM_HALF_H)
+        # ponytail: Attractiveness joins the product in slice 5
+        product = math.prod(factors.values())
         weakest = min(factors, key=factors.get)
         words = WORDS[weakest] if weakest != "community" else (
             "limited by few small boats" if b < tourism else "limited by tourist access")
@@ -37,7 +43,8 @@ def score(raw: list[dict]) -> list[dict]:
 
 INCOME_PER_DAY = 500     # € per boat per trip-day (DG MARE, Greek FLAG programme)
 TRANSPORT_HALF_KM = 10
-WORDS = {"viability": "limited by swell"}
+HEADROOM_HALF_H = 100    # AIS fishing hours / year within 6 nm
+WORDS = {"viability": "limited by swell", "headroom": "limited by fishing pressure"}
 
 
 def test():
@@ -68,6 +75,12 @@ def test():
     # A factor nobody has (all zero) does not divide by zero.
     z = dict(code="Z", small_boats=0, places=0, transport_km=0, viable_days=0)
     assert score([z])[0]["score"] == 0
+
+    # Headroom: only where fishing hours exist; 100 h halves it and joins the product.
+    calm, busy = a | dict(code="Q", fishing_hours=0), a | dict(code="P", fishing_hours=300)
+    A, Q, P = score([a, calm, busy])
+    assert "headroom" not in A and Q["headroom"] == 1 and P["headroom"] == 0.25, P
+    assert P["score"] == 0.25 and P["limiting"] == "limited by fishing pressure", P
     print("ok")
 
 

@@ -11,6 +11,7 @@ type Harbour = Summary & {
   cell_km: number; shoulder_days: number; coords: string; rank: number; of: number
   small_boats: number; places: number; transport_km: number; transport: string
   community: number; boats_part: number; tourism_part: number; viability: number; income: number
+  fishing_hours: number | null; headroom: number | null
   weekly: { week: number; viability: number }[]; trips: Trip[]
 }
 type Data = { limit_m: number; meta: Record<string, string>; harbours: Summary[] }
@@ -32,6 +33,11 @@ const PILOT: Scope = { cc: 'PT', region: 'PT20' }  // Região Autónoma dos Aço
 const inScope = ({ cc, region }: Scope) => (x: Summary) => cc === 'europe' || (x.cc === cc && (!region || x.region === region))
 const counts = <K,>(xs: K[]) => { const m = new Map<K, number>(); for (const x of xs) m.set(x, (m.get(x) ?? 0) + 1); return m }
 const fmt = (v: number) => v.toFixed(2)
+// EMODnet static-gear fishing hours (ICES VMS, vessels of 12 m and over); latest ICES edition per ecoregion.
+const EMODNET = 'https://ows.emodnet-humanactivities.eu/wms?service=WMS&version=1.1.1&layers=emodnet:fishingstaticgears'
+const PRESSURE_TILES = `${EMODNET}&request=GetMap&styles=&format=image/png&transparent=true&srs=EPSG:3857&width=256&height=256`
+  + `&bbox={bbox-epsg-3857}&CQL_FILTER=${encodeURIComponent("fo_year=2025 OR (ecoregn='Celtic Seas' AND fo_year=2024)")}`
+const PRESSURE_LEGEND = `${EMODNET.replace('layers=', 'layer=')}&request=GetLegendGraphic&format=image/png`
 
 export default function App() {
   const [limit, setLimit] = useState(1.5)
@@ -40,6 +46,7 @@ export default function App() {
   const [loaded, setH] = useState<Harbour>()
   const h = loaded?.code === code ? loaded : undefined  // never show the previous harbour
   const [scope, setScope] = useState<Scope>(PILOT)
+  const [pressure, setPressure] = useState(false)
   const mapEl = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map>(null)
   const all = data?.harbours ?? []  // ranked by score
@@ -74,6 +81,8 @@ export default function App() {
       container: mapEl.current!, style: 'https://tiles.openfreemap.org/styles/positron', ...VIEWS.azores,
     })
     m.on('load', () => {
+      m.addSource('pressure', { type: 'raster', tiles: [PRESSURE_TILES], tileSize: 256, attribution: 'EMODnet Human Activities, ICES' })
+      m.addLayer({ id: 'pressure', type: 'raster', source: 'pressure', layout: { visibility: 'none' }, paint: { 'raster-opacity': 0.8 } })
       // Clusters below zoom 8; each is coloured by the best harbour score inside it.
       m.addSource('harbours', {
         type: 'geojson', data: { type: 'FeatureCollection', features: [] },
@@ -118,6 +127,7 @@ export default function App() {
   }, [])
 
   useEffect(() => { if (map.current) showHarbours(map.current, inViewRef.current) }, [data, scope])
+  useEffect(() => { map.current?.setLayoutProperty('pressure', 'visibility', pressure ? 'visible' : 'none') }, [pressure])
 
   const europe = scope.cc === 'europe'
   const shown = europe ? inView.slice(0, TOP) : inView
@@ -145,20 +155,16 @@ export default function App() {
             {LIMITS.map(l => <option key={l} value={l}>{l.toFixed(1)} m</option>)}
           </select>
         </label>
+        <label className="muted scope"><input type="checkbox" checked={pressure} onChange={e => setPressure(e.target.checked)} />{' '}
+          Fishing intensity, static gears (EMODnet)</label>
+        {pressure && <img height={150} src={PRESSURE_LEGEND} alt="Legend: average MW fishing hours per 0.05° cell" />}
 
         {code ? (h ? <Detail h={h} limit={limit} onBack={() => setCode(undefined)} /> : <p className="muted">Loading…</p>) : <>
           <h2>Harbour score</h2>
           <div className="legend" style={{ background: `linear-gradient(to right, ${STOPS.map(s => s[1]).join()})` }} />
           <div className="legend-labels muted">{STOPS.map(([v]) => <span key={v}>{fmt(v)}</span>)}</div>
-          <p className="muted">
-            Community × Viability so far, each divided by the best harbour in Europe. A ranking, not an absolute measure.
-            Dark ring: pilot harbour. Outside the pilot this is a <b>partial score</b> until fishing pressure and stock data exist.
-            Grouped dots take the colour of their best harbour.
-          </p>
-          {data && <p className="muted">
-            {europe ? `Top ${TOP} of ${all.length}` : `${inView.length} harbours, ranked within this selection; # = rank in Europe`} ·{' '}
-            {data.meta.harbours_placed} of {data.meta.harbours_ports} ports of registration placed;{' '}
-            {data.meta.harbours_no_coords} without coordinates, {+data.meta.harbours_no_sea_cell + +data.meta.harbours_outside_europe} with no sea cell within 20 km or outside Europe.</p>}
+          <p className="muted">Dark ring: pilot harbour (full score). Others: partial score.</p>
+          {data && <p className="muted">{europe ? `Top ${TOP} of ${all.length}` : `${inView.length} harbours · # = rank in Europe`}</p>}
           <ol className="ranked">{shown.map((x, i) => (
             <li key={x.code}><button onClick={() => select(x)}>
               <span className="rank muted">{i + 1}</span>
@@ -170,11 +176,8 @@ export default function App() {
         </>}
 
         {data && <p className="muted">
-          Waves: Copernicus Marine {data.meta.wave_product}, {data.meta.wave_history}.
-          A viable day has every 3-hourly Hs in the trip window ({data.meta.trip_window}) below the wave limit.
-          The 0.083° grid cannot resolve small coves.
-          Boats: {data.meta.fleet} (licensed, under 12 m, by port of registration; not always where boats work).
-          Tourism: {data.meta.osm}; OSM counts places, rarely beds. Built {data.meta.built_at}.
+          Sources: Copernicus Marine, EU Fleet Register, OpenStreetMap, Global Fishing Watch, EMODnet.
+          Built {data.meta.built_at}.
         </p>}
       </aside>
     </div>
@@ -205,11 +208,8 @@ function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () =>
   return <>
     <h2>{h.name} <span className="muted">{h.code}</span></h2>
     <button onClick={onBack}>← All harbours</button>
-    {h.cell_km > FAR_KM && <p className="warning">
-      ⚠ Wave figures come from the nearest model sea cell, {h.cell_km} km from the harbour.
-      Sea state there may differ from the harbour's own waters.
-    </p>}
-    {!h.pilot && <p className="muted">Partial score: Community × Viability only. Fishing pressure and stock data are Azores-only for now.</p>}
+    {h.cell_km > FAR_KM && <p className="warning">⚠ Wave model cell {h.cell_km} km away</p>}
+    {h.coords === 'GeoNames' && <p className="warning">⚠ Location from GeoNames name match</p>}
     <div className="stats">
       <div><b>{fmt(h.score)}</b><span className="muted">{h.pilot ? 'harbour score' : 'partial score'} · #{h.rank} of {h.of}</span></div>
       <div><b>€{h.income.toLocaleString('en-GB')}</b><span className="muted">income potential per boat / year</span></div>
@@ -218,21 +218,20 @@ function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () =>
     <h2>Factors</h2>
     <Factor name="Community" value={h.community}
       note={`${h.small_boats} small boats · ${h.places} places to stay within 10 km · ${h.transport || 'airport/ferry'} ${h.transport_km} km`} />
-    <Factor name="Viability" value={h.viability} note="viable days per year at 1.5 m, vs the best harbour" />
+    <Factor name="Viability" value={h.viability} note="viable days per year at 1.5 m, vs the best harbour in Europe" />
     <Factor name="Attractiveness" note="habitat for target species: coming next" />
-    <Factor name="Headroom" note="fishing pressure and stock status: coming next" />
-    <p className="muted">Score and income use the default 1.5 m wave limit. Income potential = viable days × €500 per trip-day.</p>
+    <Factor name="Headroom" value={h.headroom ?? undefined} note={h.fishing_hours === null
+      ? 'pilot harbours only'
+      : `${Math.round(h.fishing_hours)} AIS fishing hours / year within 6 nm`} />
     <h2>Waves at {limit.toFixed(1)} m</h2>
     <div className="stats">
       <div><b>{Math.round(h.viable_days)}</b><span className="muted">viable days / year</span></div>
       <div><b>{Math.round(h.shoulder_days)}</b><span className="muted">in shoulder season (of 152)</span></div>
     </div>
     <h2>Season curve</h2>
-    <p className="muted">Share of viable days by week of the year at {limit.toFixed(1)} m. ~4 years per week, so single weeks are noisy. Shaded: shoulder season.</p>
+    <p className="muted">Share of viable days by week of the year at {limit.toFixed(1)} m. Shaded: shoulder season.</p>
     <SeasonCurve key={`${h.code}-${limit}`} weekly={h.weekly} />
-    {h.coords === 'GeoNames' && <p className="muted">Location matched by port name in GeoNames; may be off.</p>}
-    <h2>Next 3 days</h2>
-    {!h.trips.length && <p className="muted">Trip status is computed for the pilot harbours only.</p>}
+    {h.trips.length > 0 && <h2>Next 3 days</h2>}
     <table><tbody>{h.trips.map(t => (
       <tr key={t.date}>
         <td>{new Date(t.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })}</td>

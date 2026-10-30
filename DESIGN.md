@@ -77,7 +77,7 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
   - Time zone: that of the nearest GeoNames place.
   - Region: the NUTS 2 region (Eurostat GISCO 2024, 1:1M) that contains the harbour, or the nearest one in its country for a harbour just off the generalised coastline. The Azores pilot is NUTS 2 region PT20, which holds exactly the 11 pilot harbours.
   - Ports with no sea cell within 20 km are dropped (inland, lake or mismatched); the app reports how many were placed and dropped.
-  - Result (30 Oct 2026): 2,356 ports → 298 without coordinates, 1 outside Europe, 210 with no sea cell within 20 km → **1,847 placed**.
+  - Result (30 Oct 2026): 2,356 ports → 298 without coordinates, 1 outside Europe, 210 with no sea cell within 20 km → **1,847 placed**, holding 84% of licensed small boats (unplaced ports are mostly tiny, median 3 boats). Recovering the rest is deferred: see "Later: unplaced ports" under Further Notes.
   - A harbour whose model cell is more than ~one grid cell (9 km) away gets a warning in its detail panel.
 - The **pilot harbours** are the **11 Azorean ports of registration**, all with UN/LOCODE coordinates:
   - EU Fleet Register segments `4K9` and `4KA`;
@@ -114,18 +114,19 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 - FLAG support is left out until the Azores FLAG is identified.
 
 ### Headroom (F4)
-- **Headroom = 1 − local pressure × stock penalty.** This is one formula with two inputs; Headroom is 0 for trip areas inside no-take zones.
-- **Local pressure** (input 1, from EMODnet):
-  - EMODnet Human Activities fishing intensity, **static gears** layer: MW fishing hours on 0.05° cells, from VMS on vessels of 12 m and over.
-  - 1,273 Azores cells, fishing-overview editions 2021–2025.
-  - Per harbour: sum the fishing hours in cells within 6 nm (~11 km), divided by the highest harbour's total.
+- **Headroom = 1 / (1 + fishing hours × stock penalty / 100 h)** (ADR-0005): 100 fishing hours a year in the trip area halve it, and it never reaches zero; Headroom is 0 for trip areas inside no-take zones.
+- **Local pressure** (input 1, from Global Fishing Watch; ADR-0005):
+  - GFW apparent fishing effort (`public-global-fishing-effort`, AIS, 0.01°), 2025, all gears; one 4Wings report for the pilot box, cached.
+  - Per harbour: sum the fishing hours 2–11 km (6 nm) from the harbour; hours within 2 km are mostly mooring or manoeuvring.
+  - Result (30 Oct 2026): 0 h (Angra do Heroísmo, Santa Cruz das Flores) to 492 h (Vila Franca do Campo, Headroom 0.17).
+  - EMODnet static-gear fishing hours (ICES VMS, 0.05°) were the plan but have no cell within 6 nm of 9 of the 11 pilot harbours; they are shown as a map layer (latest edition per ecoregion).
   - Swept area ratio is **not** used: it has no Azores data (bottom trawling is banned there).
-  - Global Fishing Watch effort is the fallback only if EMODnet coverage proves too thin.
 - **Stock penalty** (input 2, from species status + habitat):
   - Status weights: Overfished 1.0, Unknown 0.7, Healthy 0.4.
   - Each weight counts in proportion to the share of the trip area that is that species' habitat (same depth and temperature calculation as Attractiveness).
   - So the penalty differs by harbour even though stock status is regional (ADR-0003).
 - Until slice 5 builds the habitat calculation, the stock penalty is 1 and Headroom uses local pressure alone.
+- Headroom joins the product for the pilot harbours only, so it can only lower a pilot harbour's rank in Europe.
 
 ### Species and Attractiveness (F5)
 - **Species table:** a few species of each status (Overfished, Unknown, Healthy).
@@ -166,7 +167,7 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 
 ### Map layers
 - **Copernicus Marine WMTS tiles:** chlorophyll, sea temperature, waves. These are live, with no processing on our side.
-- **EMODnet WMS tiles:** fishing intensity.
+- **EMODnet WMS tiles:** fishing intensity, static gears (toggle).
 - **One generated image each:** viability and habitat suitability. These are small grids, so no tile server is needed.
 - **GeoJSON:** harbours, protected areas, dark vessels.
 - **Basemap:** OpenFreeMap, which needs no key. Map library: MapLibre GL.
@@ -231,7 +232,7 @@ Each slice goes pipeline → database → API → screen and is verified in the 
 | 1 | Harbours + viability | 11 harbours on the map coloured by viability; detail panel with season curve and 3-day trip status |
 | 2 | Community + harbour score | boats, tourism access, score, limiting factor, income potential |
 | 3 | Europe: viability + Community | all 2,341 harbours placed; viability and viable days (global 0.083° waves, ~1 h in the background); Community; partial score; clustered on the map, details on zoom |
-| 4 | Fishing pressure | EMODnet static-gear tiles; Headroom from local pressure (stock penalty = 1 for now) |
+| 4 | Fishing pressure | EMODnet static-gear tiles; Headroom from GFW local pressure (stock penalty = 1 for now) |
 | 5 | Species + habitat | species table; habitat for target and Overfished species; stock penalty; full Headroom and score; trip cap |
 | 6 | Ocean layers | Copernicus WMTS chlorophyll, sea temperature, waves |
 | 7 | Dark vessels | latest GFW European layer |
@@ -239,23 +240,24 @@ Each slice goes pipeline → database → API → screen and is verified in the 
 | 9 | Monitor screen | trip log; replaced vs added; trips against cap; demo data |
 | 10 | UI pass + pitch | `ui-ux-pro-max` design pass; pitch materials |
 
+### Later: unplaced ports
+509 ports are not on the map, holding 16% of licensed small boats. Deferred; in order of payoff:
+1. **Hand-checked override list** (`data/harbour_overrides.csv`: code, name or lat/lon, source) for the biggest unplaced ports, ~30 rows. Causes it fixes:
+   - names GeoNames does not know: "Limassol New Port" (499 boats), "Isla De Arosa" (373), Finnish districts "Åland" (279) and "Uusimaa" (225);
+   - registration under an inland city or up an estuary: Roma (boats at Fiumicino), Cork, Galway, Douro;
+   - wrong coordinates: "La Cotinière" matched 170 km from Île d'Oléron; the UN/LOCODE point for Cangas is inland, not Cangas do Morrazo.
+2. **Greek transliteration in the name match:** the register writes υ as "y" (Leykada = Lefkada, 274 boats; Layrio = Lavrio; Nayplio = Nafplio). Try `ay`→`av`/`af` and `ey`→`ev`/`ef`.
+3. **Do not widen the 20 km drop rule:** it would place these ports with waves from a different stretch of sea.
+4. **Regional wave products** (MED 4.2 km, BAL, NWS) for waters the global 0.083° grid treats as land: the Gulfs of Patras and Corinth (Patras's nearest sea cell is 35 km away), the Euboean gulfs (Chalkida 24 km), the Szczecin lagoon, the Elbe, the IJsselmeer. This changes the one-global-product decision, so it needs an ADR.
+
+The build rerun after 1–2 only fetches waves for newly placed ports (per-harbour cache).
+
 ### Open questions
-- Local pressure and stock penalty for harbours outside the Azores (EMODnet for ICES waters; Global Fishing Watch effort and GFCM/STECF status for the Mediterranean).
+- Local pressure and stock penalty for harbours outside the Azores (the same GFW query per region; GFCM/STECF status for the Mediterranean).
 - Azorean pescatourism licence limits (DLR 36/2008/A; RAMTA DLR 23/2007/A): distance, sea state, passengers, hours.
 - Which FLAG covers which islands.
-- Why some EMODnet cells near harbours are empty (no vessels of 12 m and over, or withheld by ICES for confidentiality).
+- Why EMODnet cells near most Azorean harbours are empty (no vessels of 12 m and over, or withheld by ICES for confidentiality).
 - ICCAT status for bigeye and North Atlantic albacore.
 - Access to AquaMaps species ranges.
 - Daylight-dependent or per-harbour trip windows.
 
-### Known limitations (state them in the pitch)
-- About 4 years of high-resolution wave history. It matches the 40-year record on the coarse grid.
-- The 0.083° grid cannot resolve small coves; 611 of 1,847 harbours are more than 9 km from their model cell.
-- Where the model keeps reporting small waves under sea ice, ice days may count as viable (Baltic winter).
-- 298 ports of registration (13%) could not be placed: names not found in GeoNames.
-- Wave limits are assumptions.
-- Ports of registration are not always where boats work.
-- VMS and AIS miss most boats under 12 m, so fishing pressure is underestimated.
-- Habitat suitability is not observed fish.
-- Radar detections are not evidence of illegality.
-- "Replaced a fishing day" is self-reported.
