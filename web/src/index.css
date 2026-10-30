@@ -1,0 +1,24 @@
+/* ponytail: plain styles; the design pass is slice 10 (ui-ux-pro-max) */
+:root { font-family: system-ui, sans-serif; color: #1f1f1e; background: #fcfcfb; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+.app { display: flex; height: 100vh; }
+.map { flex: 1; }
+.panel { width: 340px; padding: 16px; overflow-y: auto; border-left: 1px solid #e4e3df; }
+.panel h1 { font-size: 18px; margin: 0 0 4px; }
+.panel h2 { font-size: 16px; margin: 20px 0 4px; }
+.muted { color: #6b6a66; font-size: 12px; }
+.stats { display: flex; gap: 16px; margin: 8px 0; }
+.stats b { display: block; font-size: 22px; }
+ol { padding-left: 20px; margin: 8px 0; }
+li button { all: unset; cursor: pointer; display: flex; justify-content: space-between; width: 100%; padding: 2px 0; }
+li button:hover, li button[aria-current] { font-weight: 600; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+td { padding: 4px 0; }
+.status { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; color: #fff; }
+.GO { background: #0ca30c; color: #0b0b0b; }
+.MARGINAL { background: #fab219; color: #0b0b0b; }
+.NO-GO { background: #d03b3b; }
+.legend { height: 8px; border-radius: 4px; margin-top: 8px; }
+.legend-labels { display: flex; justify-content: space-between; }
+.warning { background: #fff4dc; border-left: 4px solid #fab219; padding: 6px 8px; font-size: 13px; }
