@@ -155,9 +155,9 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 - **Partial score** = Community × Viability, for every other harbour, clearly labelled. Local pressure and stock penalty need data sources outside the Azores (EMODnet covers ICES waters only; the Mediterranean would need Global Fishing Watch), so they come later.
   - It is a ranking, not an absolute measure.
 - **Limiting factor** = the lowest factor, named in plain words.
-- **Weekly trip cap** = licensed boats × viable days that week × Headroom, rounded down. Until the Invest screen, the detail panel shows it for one licensed boat (worst–best week).
+- **Weekly trip cap** = licensed boats × viable days that week × Headroom, rounded down. The Explore view shows it for one licensed boat (worst–best week); each proposal gets its own, charted against its target, with the weeks over the cap named.
   - Licensed boats come from the proposal; for a Validated harbour, from what was recorded at validation.
-- **Income potential** = viable days per year × €500 per boat.
+- **Income potential** = viable days per year × €500 per boat. A proposal's projected income = income potential × its boats.
 - No "replace fishing days only" wording appears in the UI.
 
 ### Dark vessels (F7)
@@ -199,16 +199,18 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
    - Every judgement call lives here.
 3. **API (FastAPI + SQLite, no login).**
    - Reads: harbours with factors, species, layer metadata, the dark-vessel feed.
-   - Writes: investment proposals, validation, trips.
+   - Writes: investment proposals, validation, trips, into `data/user.db`, kept apart from `pescamare.db` because `build.py` replaces that file whole (user's choice, 30 Oct 2026).
    - Runs locally for the pitch; deployment only if time allows.
 4. **Frontend (React + TypeScript + Vite + MapLibre).**
-   - Three screens: Explore, Invest, Monitor.
+   - Three screens: Explore, Invest, Monitor. Invest lives in the harbour detail panel (form, proposals, cap chart, Validate), so it needs no router.
    - Visual design is done with the `ui-ux-pro-max` skill during the UI slice.
 
 ### Harbour lifecycle
 - Candidate → Proposed (has an investment proposal) → Validated (an authority approves it; date recorded) → Active (first trip logged).
 - **Trip log fields:** date, harbour, boat, passengers, replaced day (yes/no).
-- **Demo data:** two harbours are seeded with generated trips, flagged as demo data in the database and the UI.
+- **Demo data:** two harbours are seeded with generated trips, flagged as demo data in the database and the UI (`api.py --demo`): Ponta Delgada mostly replaces fishing days, Vila Franca do Campo mostly adds them and runs over the cap (user's choice).
+- **Monitor figures** (`GET /api/monitor`): trips made; share of viable days used = trips ÷ (licensed boats × typical viable days since validation, from the weekly averages; user's choice); replaced vs added days; trips per Monday–Sunday week against that week's trip cap.
+- Monitor is a second tab in the side panel (Explore / Monitor), with a trip log form per harbour.
 
 ## Testing Decisions
 

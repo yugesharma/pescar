@@ -16,7 +16,17 @@ type Harbour = Summary & {
   fishing_hours: number | null; headroom: number | null; stock_penalty: number | null
   attractiveness: number | null; habitat_share: number | null
   weekly: { week: number; viability: number; trip_cap: number | null }[]; trips: Trip[]
+  state: 'Candidate' | 'Proposed' | 'Validated' | 'Active'; proposals: Proposal[]; validation: { date: string; boats: number } | null
   species: { name: string; scientific: string; status: 'Overfished' | 'Unknown' | 'Healthy'; source: string; year: number | null; target: number; share: number | null }[]
+}
+type Proposal = {
+  id: number; boats: number; training: number; budget: number; target: number; notes: string; created: string
+  income: number; caps: (number | null)[]; over_weeks: number[]
+}
+type Watched = {
+  code: string; name: string; state: 'Validated' | 'Active'; validated: string; boats: number; demo: boolean
+  trips: number; replaced: number; added: number; expected_days: number; used: number | null; over_weeks: number
+  weekly: { start: string; trips: number; cap: number | null }[]
 }
 type Data = { limit_m: number; meta: Record<string, string>; harbours: Summary[] }
 
@@ -79,6 +89,8 @@ export default function App() {
   const [data, setData] = useState<Data>()
   const [code, setCode] = useState<string>()
   const [loaded, setH] = useState<Harbour>()
+  const [rev, setRev] = useState(0)
+  const [view, setView] = useState<'explore' | 'monitor'>('explore')  // bumped after a save, to refetch the harbour
   const h = loaded?.code === code ? loaded : undefined  // never show the previous harbour
   const [scope, setScope] = useState<Scope>(PILOT)
   const [pressure, setPressure] = useState(false)
@@ -103,7 +115,7 @@ export default function App() {
 
   useEffect(() => {
     if (code) fetch(`/api/harbours/${code}?limit=${limit}`).then(r => r.json()).then(setH)
-  }, [code, limit])
+  }, [code, limit, rev])
 
   const changeScope = (v: Scope) => {
     setScope(v); setCode(undefined)
@@ -121,7 +133,7 @@ export default function App() {
 
   useEffect(() => {
     const m = new maplibregl.Map({
-      container: mapEl.current!, style: 'https://tiles.openfreemap.org/styles/positron', ...VIEWS.azores,
+      container: mapEl.current!, style: 'https://tiles.openfreemap.org/styles/positron', ...VIEWS.azores, attributionControl: { compact: true },
     })
     m.on('load', () => {
       m.addSource('pressure', { type: 'raster', tiles: [PRESSURE_TILES], tileSize: 256, attribution: 'EMODnet Human Activities, ICES' })
@@ -268,6 +280,12 @@ export default function App() {
       </div>
       <aside className="panel">
         <h1>PescaMare</h1>
+        <div className="tabs" role="tablist">{(['explore', 'monitor'] as const).map(v =>
+          <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)}>{v[0].toUpperCase() + v.slice(1)}</button>)}
+        </div>
+        {view === 'monitor' ? <Monitor limit={limit} onOpen={code => {
+          const s = all.find(x => x.code === code); setView('explore'); if (s) select(s) }} /> : <>
+        <div className="controls">
         <label className="muted scope">Country{' '}
           <select value={scope.cc} onChange={e => changeScope({ cc: e.target.value, region: '' })}>
             <option value="europe">All Europe ({all.length})</option>
@@ -280,11 +298,13 @@ export default function App() {
             {regions.map(r => <option key={r.id} value={r.id}>{r.name} ({r.n}){r.id === PILOT.region ? ' · pilot' : ''}</option>)}
           </select>
         </label>}
-        <label className="muted">Wave limit{' '}
+        <label className="muted scope">Wave limit{' '}
           <select value={limit} onChange={e => setLimit(+e.target.value)}>
             {LIMITS.map(l => <option key={l} value={l}>{l.toFixed(1)} m</option>)}
           </select>
         </label>
+        </div>
+        <fieldset className="layers"><legend>Map layers</legend>
         <label className="muted scope"><input type="checkbox" checked={pressure} onChange={e => setPressure(e.target.checked)} />{' '}
           Fishing intensity, static gears (EMODnet)</label>
         {pressure && <img height={150} src={PRESSURE_LEGEND} alt="Legend: average MW fishing hours per 0.05° cell" />}
@@ -292,7 +312,7 @@ export default function App() {
           Fish fronts, sea temperature × chlorophyll{data && ` (${data.meta.fronts_dates})`}</label>
         {fronts && <p className="muted">
           <span className="swatch" style={{ background: 'rgb(214,40,40)' }} /> temperature front{' '}
-          <span className="swatch" style={{ background: 'rgb(37,99,235)' }} /> front head-on with chlorophyll (upwelling)
+          <span className="swatch" style={{ background: 'rgb(13,148,136)' }} /> front head-on with chlorophyll (upwelling)
         </p>}
         <label className="muted scope"><input type="checkbox" checked={dark} onChange={e => setDark(e.target.checked)} />{' '}
           Dark vessels, radar detections without AIS (Global Fishing Watch{darkDates && `, ${darkDates}`})</label>
@@ -309,8 +329,9 @@ export default function App() {
           {ocean[o.id] && <img height={220} alt={`Legend: ${o.name}`}
             src={`${oceanQuery(o)}&REQUEST=GetLegend&FORMAT=${encodeURIComponent('image/svg+xml')}`} />}
         </div>)}
+        </fieldset>
 
-        {code ? (h ? <Detail h={h} limit={limit} onBack={() => setCode(undefined)} /> : <p className="muted">Loading…</p>) : <>
+        {code ? (h ? <Detail h={h} limit={limit} onBack={() => setCode(undefined)} onSaved={() => setRev(r => r + 1)} /> : <p className="muted">Loading…</p>) : <>
           <h2>Harbour score</h2>
           <div className="legend" style={{ background: `linear-gradient(to right, ${STOPS.map(s => s[1]).join()})` }} />
           <div className="legend-labels muted">{STOPS.map(([v]) => <span key={v}>{fmt(v)}</span>)}</div>
@@ -324,6 +345,7 @@ export default function App() {
               <span>{fmt(x.score)}</span>
             </button></li>))}
           </ol>
+        </>}
         </>}
 
         {data && <p className="muted">
@@ -355,10 +377,10 @@ function Factor({ name, value, note }: { name: string; value?: number; note: str
   </div>
 }
 
-function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () => void }) {
+function Detail({ h, limit, onBack, onSaved }: { h: Harbour; limit: number; onBack: () => void; onSaved: () => void }) {
   return <>
     <h2>{h.name} <span className="muted">{h.code}</span></h2>
-    <button onClick={onBack}>← All harbours</button>
+    <button className="btn" onClick={onBack}>← All harbours</button>
     {h.cell_km > FAR_KM && <p className="warning">⚠ Wave model cell {h.cell_km} km away</p>}
     {h.coords === 'GeoNames' && <p className="warning">⚠ Location from GeoNames name match</p>}
     <div className="stats">
@@ -397,6 +419,7 @@ function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () =>
         </tr>))}
       </tbody></table>
     </>}
+    <Invest key={h.code} h={h} limit={limit} onSaved={onSaved} />
     {h.trips.length > 0 && <h2>Next 3 days</h2>}
     <table><tbody>{h.trips.map(t => (
       <tr key={t.date}>
@@ -406,6 +429,200 @@ function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () =>
       </tr>))}
     </tbody></table>
   </>
+}
+
+const eur = (v: number) => `€${Math.round(v).toLocaleString('en-GB')}`
+const today = () => new Date().toISOString().slice(0, 10)
+// Weeks as runs: [1,2,3,7,8] -> "1–3, 7–8"
+const runs = (ws: number[]) => ws.reduce<number[][]>((a, w) => {
+  const last = a.at(-1)
+  if (last && w === last[1] + 1) last[1] = w; else a.push([w, w])
+  return a
+}, []).map(([a, b]) => a === b ? `${a}` : `${a}–${b}`).join(', ')
+async function post(url: string, body: object) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  if (r.ok) return
+  const d = (await r.json()).detail
+  throw new Error(typeof d === 'string' ? d : d.map((e: { loc: string[]; msg: string }) => `${e.loc.at(-1)}: ${e.msg}`).join('; '))
+}
+
+const FIELDS = [['boats', 'Boats to license'], ['training', 'Training places'], ['budget', 'Budget (€)'], ['target', 'Target trips / week']] as const
+
+function Invest({ h, limit, onSaved }: { h: Harbour; limit: number; onSaved: () => void }) {
+  const [form, setForm] = useState({ boats: 2, training: 4, budget: 50000, target: 6, notes: '' })
+  const [error, setError] = useState<string>()
+  const [picked, setPicked] = useState<number>()
+  const [vDate, setVDate] = useState(today())
+  const shown = h.proposals.find(p => p.id === picked) ?? h.proposals[0]
+  const [vBoats, setVBoats] = useState<number>()
+  const save = (url: string, body: object) => post(url, body).then(() => { setError(undefined); onSaved() }, e => setError(e.message))
+  return <>
+    <h2>Invest <span className={`status ${h.state}`}>{h.state}</span></h2>
+    <form className="invest" onSubmit={e => { e.preventDefault(); save(`/api/harbours/${h.code}/proposals`, form) }}>
+      {FIELDS.map(([k, name]) => <label key={k} className="muted">{name}
+        <input type="number" min={k === 'boats' ? 1 : 0} required value={form[k]} onChange={e => setForm({ ...form, [k]: +e.target.value })} />
+      </label>)}
+      <label className="muted wide">Notes<textarea rows={2} maxLength={2000} value={form.notes}
+        onChange={e => setForm({ ...form, notes: e.target.value })} /></label>
+      <p className="muted wide">Projected income {eur(h.income * form.boats)} / year vs budget {eur(form.budget)}</p>
+      <button className="wide btn primary">Save proposal</button>
+    </form>
+    {error && <p className="warning">⚠ {error}</p>}
+    {h.proposals.length > 0 && <>
+      <h2>Proposals</h2>
+      <table className="proposals"><tbody>{h.proposals.map(p => (
+        <tr key={p.id} className={p === shown ? 'picked' : ''} tabIndex={0}
+          onClick={() => setPicked(p.id)} onKeyDown={e => e.key === 'Enter' && setPicked(p.id)}>
+          <td>{dayMonth(p.created)}<br /><span className="muted">{p.boats} boats · {p.training} training · {p.target} trips/wk</span>
+            {p.notes && <><br /><span className="muted">{p.notes}</span></>}</td>
+          <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{eur(p.budget)}<br /><span className="muted">{eur(p.income)} / yr</span></td>
+          <td>{p.caps[0] === null ? <span className="muted">no cap</span>
+            : p.over_weeks.length ? <span className="status over">⚠ {p.over_weeks.length} wk</span>
+            : <span className="status Healthy">✓ cap</span>}</td>
+        </tr>))}
+      </tbody></table>
+      {shown.caps[0] === null ? <p className="muted">Trip cap: pilot harbours only</p> : <>
+        <p className={shown.over_weeks.length ? 'warning' : 'muted'}>{shown.over_weeks.length
+          ? `⚠ ${shown.target} trips / week is over the cap in ${shown.over_weeks.length} weeks: ${runs(shown.over_weeks)}`
+          : `${shown.target} trips / week is within the cap every week`} ({shown.boats} boats, {limit.toFixed(1)} m)</p>
+        <CapChart key={shown.id} weekly={h.weekly} p={shown} />
+      </>}
+      {h.validation ? <p>Validated {dayMonth(h.validation.date)} {h.validation.date.slice(0, 4)} · {h.validation.boats} licensed boats</p>
+        : <form className="invest" onSubmit={e => { e.preventDefault()
+          save(`/api/harbours/${h.code}/validation`, { date: vDate, boats: vBoats ?? shown.boats }) }}>
+          <label className="muted">Validation date<input type="date" required value={vDate} onChange={e => setVDate(e.target.value)} /></label>
+          <label className="muted">Licensed boats<input type="number" min={1} required value={vBoats ?? shown.boats}
+            onChange={e => setVBoats(+e.target.value)} /></label>
+          <button className="wide btn primary">Mark Validated</button>
+        </form>}
+    </>}
+  </>
+}
+
+const INK = '#1f1f1e', OVER = '#fff4dc'
+const TRIPS = BLUE, OVER_BAR = '#eb6834', ADDED = '#eb6834'  // palette slots 1 and 2
+
+function Monitor({ limit, onOpen }: { limit: number; onOpen: (code: string) => void }) {
+  const [list, setList] = useState<Watched[]>()
+  const [rev, setRev] = useState(0)
+  useEffect(() => { fetch(`/api/monitor?limit=${limit}`).then(r => r.json()).then(d => setList(d.harbours)) }, [limit, rev])
+  if (!list) return <p className="muted">Loading…</p>
+  if (!list.length) return <p className="muted">No Validated harbours yet. Validate one from its Invest section.</p>
+  return <>{list.map(w => <section key={w.code} className="watched">
+    <h2><button className="link" onClick={() => onOpen(w.code)}>{w.name}</button>{' '}
+      <span className={`status ${w.state}`}>{w.state}</span>{w.demo && <span className="demo">demo data</span>}</h2>
+    <p className="muted">Validated {dayMonth(w.validated)} {w.validated.slice(0, 4)} · {w.boats} licensed boats</p>
+    <div className="stats">
+      <div><b>{w.trips}</b><span className="muted">trips made</span></div>
+      <div><b>{w.used === null ? '–' : pct(w.used)}</b><span className="muted">of typical viable boat-days used ({Math.round(w.expected_days)})</span></div>
+    </div>
+    {w.trips > 0 && <>
+      <div className="split" role="img" aria-label={`${w.replaced} replaced, ${w.added} added fishing days`}>
+        <div style={{ flex: w.replaced, background: BLUE }} /><div style={{ flex: w.added, background: ADDED }} />
+      </div>
+      <p className="muted"><span className="swatch" style={{ background: BLUE }} /> {w.replaced} replaced a fishing day{' '}
+        <span className="swatch" style={{ background: ADDED }} /> {w.added} added ({pct(w.added / w.trips)})</p>
+    </>}
+    {w.weekly[0]?.cap === null ? <p className="muted">Trip cap: pilot harbours only</p> : <>
+      <p className={w.over_weeks ? 'warning' : 'muted'}>{w.over_weeks
+        ? `⚠ Over the trip cap in ${w.over_weeks} of ${w.weekly.length} weeks` : `Within the trip cap every week`} ({limit.toFixed(1)} m)</p>
+      <WeekBars weekly={w.weekly} />
+    </>}
+    <TripForm code={w.code} since={w.validated} onSaved={() => setRev(r => r + 1)} />
+  </section>)}</>
+}
+
+function TripForm({ code, since, onSaved }: { code: string; since: string; onSaved: () => void }) {
+  const [t, setT] = useState({ date: today(), boat: 'Boat 1', passengers: 4, replaced: true })
+  const [error, setError] = useState<string>()
+  return <details><summary>Log a trip</summary>
+    <form className="invest" onSubmit={e => { e.preventDefault()
+      post(`/api/harbours/${code}/trips`, t).then(() => { setError(undefined); onSaved() }, e => setError(e.message)) }}>
+      <label className="muted">Date<input type="date" required min={since} max={today()} value={t.date}
+        onChange={e => setT({ ...t, date: e.target.value })} /></label>
+      <label className="muted">Boat<input required maxLength={100} value={t.boat} onChange={e => setT({ ...t, boat: e.target.value })} /></label>
+      <label className="muted">Passengers<input type="number" min={1} max={50} required value={t.passengers}
+        onChange={e => setT({ ...t, passengers: +e.target.value })} /></label>
+      <label className="muted check"><input type="checkbox" checked={t.replaced} onChange={e => setT({ ...t, replaced: e.target.checked })} />
+        Replaced a fishing day</label>
+      <button className="wide btn primary">Save trip</button>
+    </form>
+    {error && <p className="warning">⚠ {error}</p>}
+  </details>
+}
+
+function WeekBars({ weekly }: { weekly: Watched['weekly'] }) {
+  const [hover, setHover] = useState<number>()
+  const top = Math.max(1, ...weekly.flatMap(w => [w.trips, w.cap!])) * 1.1
+  const yc = (v: number) => T + (1 - v / top) * (H - T - B)
+  const step = (W - L - 4) / weekly.length
+  const ticks = [0, Math.round(top / 2.2), Math.round(top / 1.1)]
+  const capPath = weekly.map((w, i) => `${i ? 'L' : 'M'}${L + i * step},${yc(w.cap!)}H${L + (i + 1) * step}`).join('')
+  const hw = hover === undefined ? undefined : weekly[hover]
+  return <>
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="Trips per week and trip cap"
+      onMouseLeave={() => setHover(undefined)} onMouseMove={e => {
+        const r = e.currentTarget.getBoundingClientRect()
+        const i = Math.floor((((e.clientX - r.left) / r.width) * W - L) / step)
+        setHover(i >= 0 && i < weekly.length ? i : undefined) }}>
+      {ticks.map(v => <g key={v}>
+        <line x1={L} x2={W - 4} y1={yc(v)} y2={yc(v)} stroke="#e4e3df" />
+        <text x={L - 4} y={yc(v) + 4} fontSize="10" textAnchor="end" fill="#6b6a66">{v}</text>
+      </g>)}
+      {weekly.map((w, i) => <g key={w.start}>
+        {w.trips > 0 && <rect x={L + i * step + 1} y={yc(w.trips)} width={Math.max(1, step - 2)} height={yc(0) - yc(w.trips)}
+          rx="2" fill={w.trips > w.cap! ? OVER_BAR : TRIPS} opacity={hover === undefined || hover === i ? 1 : 0.6} />}
+        {(i ? w.start.slice(5, 7) !== weekly[i - 1].start.slice(5, 7) : w.start.slice(5, 7) === weekly[2]?.start.slice(5, 7)) &&
+          <text x={L + i * step} y={H - 4} fontSize="10" fill="#6b6a66">{MONTHS[+w.start.slice(5, 7) - 1]}</text>}
+      </g>)}
+      <path d={capPath} fill="none" stroke={INK} strokeWidth="2" />
+    </svg>
+    <p className="muted">
+      <span className="swatch" style={{ background: TRIPS }} /> trips{' '}
+      <span className="swatch" style={{ background: OVER_BAR }} /> ⚠ over cap{' '}
+      <span className="swatch" style={{ background: INK }} /> trip cap
+    </p>
+    <p className="muted">{hw ? `Week of ${dayMonth(hw.start)}: ${hw.trips} trips, cap ${hw.cap}${hw.trips > hw.cap! ? ' · ⚠ over cap' : ''}`
+      : 'Hover the chart for weekly values.'}</p>
+  </>
+}
+
+function CapChart({ weekly, p }: { weekly: Harbour['weekly']; p: Proposal }) {
+  const [hover, setHover] = useState<number>()  // index into weekly
+  const top = Math.max(1, p.target, ...p.caps.map(c => c!)) * 1.1
+  const yc = (v: number) => T + (1 - v / top) * (H - T - B)
+  const step = (W - L - 4) / 52
+  const over = new Set(p.over_weeks)
+  const path = weekly.map((w, i) => `${i ? 'L' : 'M'}${x(w.week)},${yc(p.caps[i]!)}H${x(w.week) + step}`).join('')
+  const ticks = [0, Math.round(top / 2.2), Math.round(top / 1.1)]
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const r = e.currentTarget.getBoundingClientRect()
+    const i = Math.floor((((e.clientX - r.left) / r.width) * W - L) / step)
+    setHover(i >= 0 && i < weekly.length ? i : undefined)
+  }
+  const hw = hover === undefined ? undefined : weekly[hover]
+  return (<>
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" onMouseMove={onMove} onMouseLeave={() => setHover(undefined)}
+      role="img" aria-label={`Trip cap and target trips per week; over the cap in ${p.over_weeks.length} weeks`}>
+      {weekly.filter(w => over.has(w.week)).map(w =>
+        <rect key={w.week} x={x(w.week)} y={T} width={step} height={H - T - B} fill={OVER} />)}
+      {ticks.map(v => <g key={v}>
+        <line x1={L} x2={W - 4} y1={yc(v)} y2={yc(v)} stroke="#e4e3df" />
+        <text x={L - 4} y={yc(v) + 4} fontSize="10" textAnchor="end" fill="#6b6a66">{v}</text>
+      </g>)}
+      {[...MONTHS].map((m, i) => <text key={i} x={x(weekOf(i + 0.5))} y={H - 4} fontSize="10" textAnchor="middle" fill="#6b6a66">{m}</text>)}
+      <path d={path} fill="none" stroke={BLUE} strokeWidth="2" />
+      <line x1={L} x2={W - 4} y1={yc(p.target)} y2={yc(p.target)} stroke={INK} strokeWidth="2" strokeDasharray="5 3" />
+      {hw && <line x1={x(hw.week) + step / 2} x2={x(hw.week) + step / 2} y1={T} y2={H - B} stroke="#9a9993" />}
+    </svg>
+    <p className="muted">
+      <span className="swatch" style={{ background: BLUE }} /> trip cap{' '}
+      <span className="swatch" style={{ background: INK }} /> target{' '}
+      <span className="swatch" style={{ background: OVER, outline: '1px solid #fab219' }} /> ⚠ over cap
+    </p>
+    <p className="muted">{hw ? `Week ${hw.week}: cap ${p.caps[hover!]} trips, target ${p.target}${over.has(hw.week) ? ' · ⚠ over cap' : ''}`
+      : 'Hover the chart for weekly values.'}</p>
+  </>)
 }
 
 const W = 300, H = 130, L = 28, B = 18, T = 8

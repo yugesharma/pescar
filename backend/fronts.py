@@ -20,7 +20,7 @@ DAYS = 3                  # composite length, as in the paper
 FRONT_C_PER_KM = 0.02     # judgement (user, 30 Oct 2026): SST front; ~ the strongest 10% of Azores sea on 27-29 Oct 2026
 HEAD_ON = -0.7            # judgement (user): angle between the gradients over ~135°
 PNG = Path(__file__).parent.parent / "data" / "fronts.png"
-COLOURS = {1: (214, 40, 40, 230), 2: (37, 99, 235, 240)}   # front, head-on front
+COLOURS = {1: (214, 40, 40, 230), 2: (13, 148, 136, 240)}   # front, head-on front
 
 
 def classify(t: np.ndarray, c: np.ndarray, lat: np.ndarray, step: float) -> np.ndarray:
