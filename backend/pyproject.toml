@@ -10,3 +10,8 @@ dependencies = [
     "shapely>=2.2.0",
     "uvicorn>=0.54.0",
 ]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+]

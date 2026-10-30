@@ -71,7 +71,7 @@ AIS fishing hours (Global Fishing Watch) recorded 2 km to 6 nm from a harbour in
 _Avoid_: fishing intensity, effort score
 
 **Stock penalty**:
-How fragile the fish near a harbour are: species status weights (Overfished 1.0, Unknown 0.7, Healthy 0.4), each counted by the share of the trip area that is that species' habitat.
+How fragile the fish near a harbour are: species status weights (Overfished 1.0, Unknown 0.7, Healthy 0.4) averaged by the share of the trip area that is each species' habitat; between 0.4 and 1.
 _Avoid_: stock risk, regional penalty
 
 **Limiting factor**:

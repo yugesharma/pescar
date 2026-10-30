@@ -15,8 +15,11 @@ import numpy as np
 import pandas as pd
 
 import community
+import fronts
+import habitat
 import pressure
 import scoring
+import species
 import waves
 
 DATA = Path(__file__).parent.parent / "data"
@@ -150,12 +153,22 @@ def main():
     h = h.merge(placed, on="code")
     h = h.merge(community.run(h), on="code").merge(regions(h), on="code")
     h = h.merge(pressure.run(h), on="code", how="left")
-    h["fishing_hours"] = h.fishing_hours.astype(object).where(h.fishing_hours.notna(), None)  # None = partial score
+    sp = species.run()
+    hab = habitat.run(h, sp)
+    year = hab.groupby(["code", "species"]).share.mean().reset_index()  # mean over the 12 months
+    status = dict(zip(sp.name, sp.status))
+    h["stock_shares"] = h.code.map({c: [(status[s], x) for s, x in zip(g.species, g.share)] for c, g in year.groupby("code")})
+    # Judgement: Attractiveness = target species' habitat share, mean over the target species and months.
+    h["habitat_share"] = h.code.map(year[year.species.isin(sp.name[sp.target])].groupby("code").share.mean())
+    for c in ["fishing_hours", "habitat_share", "stock_shares"]:  # None = partial score
+        h[c] = h[c].astype(object).where(h[c].notna(), None)
     default = w["viable_days"].query("limit_m == 1.5")[["code", "per_year"]]
     h = pd.DataFrame(scoring.score(
         h.merge(default.rename(columns={"per_year": "viable_days"})).to_dict("records"))
     ).drop(columns="viable_days")  # per-limit values live in the viable_days table
     w = {k: v[v.code.isin(h.code)] for k, v in w.items()}
+    p = h[h.pilot.astype(bool)]
+    layers = fronts.run((p.lat.min() - 0.7, p.lat.max() + 0.7), (p.lon.min() - 0.7, p.lon.max() + 0.7))
     meta = pd.DataFrame([
         *[(f"harbours_{k}", str(v)) for k, v in counts.items()],
         ("built_at", pd.Timestamp.now(tz="UTC").isoformat(timespec="minutes")),
@@ -166,13 +179,16 @@ def main():
             pd.Timestamp((community.CACHE / f"osm_{cc}.json").stat().st_mtime, unit="s").strftime(f"{cc} %Y-%m-%d")
             for cc in sorted(h.cc.unique()))),
         ("fleet", "EU Fleet Register, current records"),
+        ("species", "ICES Stock Assessment Graphs, ICCAT, AquaMaps, FishBase"),
+        ("habitat", f"Copernicus Marine {habitat.TEMP}, {habitat.YEARS[0][:4]}-{habitat.YEARS[1][:4]}; EMODnet Bathymetry"),
+        *layers.items(),
         ("pressure", f"Global Fishing Watch apparent fishing effort (AIS), {pressure.YEAR}, "
                      f"{pressure.PORT_KM}-{pressure.TRIP_KM:.0f} km from the harbour"),
     ], columns=["key", "value"])
     tmp = DB.with_suffix(".tmp")
     tmp.unlink(missing_ok=True)
     with sqlite3.connect(tmp) as con:
-        for name, df in dict(harbours=h, meta=meta, **w).items():
+        for name, df in dict(harbours=h, meta=meta, species=sp, habitat=hab, **w).items():
             df.to_sql(name, con, index=False)
     tmp.replace(DB)  # swap in whole, so the API never reads a half-written db
     print(f"wrote {DB}: {len(h)} harbours")

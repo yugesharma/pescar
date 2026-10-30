@@ -48,6 +48,7 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 15. As a regional fisheries officer, I want protected areas shown on the map, so that I can see where fishing is restricted.
 16. As a regional fisheries officer, I want the latest radar detections of vessels without AIS in European waters, labelled with their date, so that I can see current unidentified activity near protected areas.
 17. As a regional fisheries officer, I want every layer to state its source, date and limitations, so that I do not over-read the data.
+18b. As a boat captain, I want to click a centre on the map and read the range (nm) and true bearing to any point under the cursor, so that I can plan a trip to a front or a fishing ground.
 18. As a fisher, I want GO / MARGINAL / NO-GO for my harbour for the next 3 days, with the worst wave height in the trip window, so that I can decide whether to take tourists out.
 
 ### Invest: proposing a harbour
@@ -123,28 +124,30 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
   - Swept area ratio is **not** used: it has no Azores data (bottom trawling is banned there).
 - **Stock penalty** (input 2, from species status + habitat):
   - Status weights: Overfished 1.0, Unknown 0.7, Healthy 0.4.
-  - Each weight counts in proportion to the share of the trip area that is that species' habitat (same depth and temperature calculation as Attractiveness).
+  - Stock penalty = Σ weight × habitat share ÷ Σ habitat share over every species in the table (same habitat calculation as Attractiveness), so it stays between 0.4 and 1; a trip area with no habitat of any listed species gets 1 (ADR-0006).
   - So the penalty differs by harbour even though stock status is regional (ADR-0003).
-- Until slice 5 builds the habitat calculation, the stock penalty is 1 and Headroom uses local pressure alone.
+  - Result (30 Oct 2026): 0.57 (Horta) to 0.67 (Velas).
 - Headroom joins the product for the pilot harbours only, so it can only lower a pilot harbour's rank in Europe.
 
 ### Species and Attractiveness (F5)
 - **Species table:** a few species of each status (Overfished, Unknown, Healthy).
-  - ICES SAG stocks are read automatically, using the latest assessment across years and the text status fields.
-  - A few ICCAT tuna stocks are entered by hand.
+  - ICES SAG stocks are read automatically: the latest advice assessment since 2015, and the text status of its MSY line (F above FMSY or stock below MSY Btrigger → Overfished; both fine → Healthy; else Unknown).
+  - ICCAT tuna stocks and chub mackerel (no assessment) are entered by hand.
   - Each row cites its source and assessment year.
-  - Current picture:
-    - Overfished: blackspot seabream, greater forkbeard, black scabbardfish.
-    - Unknown: blue jack mackerel, chub mackerel, alfonsinos.
-    - Healthy: skipjack tuna; bigeye to be verified.
+  - Result (30 Oct 2026):
+    - Overfished: blackspot seabream (ICES 2025), black scabbardfish (ICES 2025).
+    - Unknown: blue jack mackerel (ICES 2024), alfonsinos (ICES 2026), greater forkbeard (ICES 2026; was Overfished), chub mackerel (no assessment).
+    - Healthy: skipjack tuna (ICCAT SKJ-E 2022), bigeye tuna (ICCAT BET 2025).
 - **Demand** is a one-off cited snapshot of the most-landed Azorean species: the SREA 2025 summary. Nothing more is taken from SREA.
 - **Target species** are the top two by demand that are not Overfished: **blue jack mackerel** and **skipjack tuna**.
 - The same habitat calculation also runs for the Overfished species, to give each harbour's stock penalty (see Headroom).
-- **Attractiveness** = the share of each harbour's trip area (6 nm) where the target species' habitat is suitable, by month. Suitable means:
-  - monthly Copernicus sea temperature is inside the species' AquaMaps range;
-  - depth is inside its range (EMODnet bathymetry, or GEBCO where EMODnet does not reach);
-  - chlorophyll-a from Copernicus biogeochemistry is included.
-- The method is adapted from Map2Fish's inputs and probability framing. We have no catch data to calibrate with, so we use species ranges instead.
+- **Habitat** (ADR-0006): for each EMODnet Bathymetry sea cell (~115 m) within 6 nm of a pilot harbour and each month, a species' habitat is suitable when:
+  - Copernicus monthly sea temperature (`cmems_mod_glo_phy-thetao_anfc_0.083deg_P1M-m`, mean of 2023–2025 per month) is inside the species' range: the 10th–90th percentile of the temperatures of the cells AquaMaps used for its envelope; surface temperature for surface fish, temperature at the seabed for bottom-living fish;
+  - for bottom-living fish only, seabed depth is inside the FishBase "usually" depth range.
+  - Chlorophyll is not scored; it is a map layer (slice 6).
+- **Attractiveness** = the target species' habitat share of the trip area, mean over the two species and 12 months, divided by the best pilot harbour.
+  - Result (30 Oct 2026): habitat share 0.29 (Flores, Terceira's Praia, Graciosa) to 0.42 (Vila do Porto). Surface temperature hardly varies within 6 nm, so it separates harbours little.
+- The method is adapted from Map2Fish's inputs and probability framing. We have no catch data to calibrate with, so we use species ranges instead. Map2Fish's own front method is the fish fronts map layer (see Map layers).
 
 ### Harbour score (F8) and trip cap (F6)
 - **Harbour score** = Community × Viability × Attractiveness × Headroom, for the 11 pilot harbours.
@@ -152,25 +155,39 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 - **Partial score** = Community × Viability, for every other harbour, clearly labelled. Local pressure and stock penalty need data sources outside the Azores (EMODnet covers ICES waters only; the Mediterranean would need Global Fishing Watch), so they come later.
   - It is a ranking, not an absolute measure.
 - **Limiting factor** = the lowest factor, named in plain words.
-- **Weekly trip cap** = licensed boats × viable days that week × Headroom, rounded down.
+- **Weekly trip cap** = licensed boats × viable days that week × Headroom, rounded down. Until the Invest screen, the detail panel shows it for one licensed boat (worst–best week).
   - Licensed boats come from the proposal; for a Validated harbour, from what was recorded at validation.
 - **Income potential** = viable days per year × €500 per boat.
 - No "replace fishing days only" wording appears in the UI.
 
 ### Dark vessels (F7)
 - Data: Global Fishing Watch radar detections of vessels without AIS (`public-global-sar-presence`, `matched=false`).
-  - Coverage: all European waters, as 0.1° gridded counts.
-  - Only the most recent date GFW has published is shown, labelled with that date.
-- The backend checks once a day and swaps in newer data when it appears. GFW lags about 72 hours, so checking more often gains nothing.
+  - Coverage: the harbours' Europe box (27–72°N, 32°W–45°E), as 0.1° gridded counts (detections per cell).
+  - The last 7 days GFW has published, summed and labelled with their dates. One day covers only that day's satellite passes, so a single day leaves much of the sea blank (user's choice, 30 Oct 2026).
+  - Result (30 Oct 2026): 21–27 Oct, 9,187 detections without AIS in 5,768 cells (21,646 more were matched to AIS).
+- The API checks GFW at most once a day (`backend/dark.py`) and swaps in newer data when it appears; if GFW is down it keeps serving the last layer. GFW lags about 72 hours, so checking more often gains nothing.
+- On the map: amber dots, area ∝ detections, hover for the count.
 - The token lives in `.env`.
 - The layer is an overlay only. It is not part of the score and is labelled "not evidence of illegal activity".
 
 ### Map layers
 - **Copernicus Marine WMTS tiles:** chlorophyll, sea temperature, waves. These are live, with no processing on our side.
+  - Chlorophyll (gap-free 4 km, log scale 0.05–2 mg/m³), surface sea temperature (0.083° daily, 0–30 °C), wave height (0.083° 3-hourly, 0–4 m).
+  - Each shows its dataset's latest time step, read in the browser from that dataset's WMTS capabilities, and states it in its label.
+  - Result (30 Oct 2026): chlorophyll 29 Oct, temperature 31 Oct (forecast), waves 30 Oct 18:00 UTC.
 - **EMODnet WMS tiles:** fishing intensity, static gears (toggle).
 - **One generated image each:** viability and habitat suitability. These are small grids, so no tile server is needed.
+- **Fish fronts** (ADR-0007; a map layer, not scored): the method behind Map2Fish (Tijani et al. 2015) without its catch-data calibration.
+  - Last 3 days of Copernicus SST (`METOFFICE-GLO-SST-L4-NRT-OBS-SST-V2`, 0.05°) and gap-free chlorophyll (`cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-multi-4km_P1D`), on the chlorophyll grid.
+  - Front: SST gradient ≥ 0.02 °C/km. Head-on (upwelling): P = ∇T·∇C / (‖∇T‖‖∇C‖) < −0.7, chlorophyll on log10.
+  - One PNG for the pilot area, written by `build.py`, labelled with its dates.
 - **GeoJSON:** harbours, protected areas, dark vessels.
 - **Basemap:** OpenFreeMap, which needs no key. Map library: MapLibre GL.
+
+### Range and bearing (map tool)
+- Button or `R` turns it on; `Esc` leaves. Click 1 sets the centre (snaps to a harbour), moving the cursor moves the line, a range ring through the cursor, and the readout `range nm · bearing °T`; click 2 pins it; click 3 starts a new one. Two taps work on touch screens.
+- While on, map clicks do not open harbours.
+- Haversine on a sphere, true bearings; pure functions in `frontend/src/geo.ts`, self-check `node geo.check.ts`.
 
 ### Modules
 1. **Data pipeline (Python).**
@@ -233,9 +250,9 @@ Each slice goes pipeline → database → API → screen and is verified in the 
 | 2 | Community + harbour score | boats, tourism access, score, limiting factor, income potential |
 | 3 | Europe: viability + Community | all 2,341 harbours placed; viability and viable days (global 0.083° waves, ~1 h in the background); Community; partial score; clustered on the map, details on zoom |
 | 4 | Fishing pressure | EMODnet static-gear tiles; Headroom from GFW local pressure (stock penalty = 1 for now) |
-| 5 | Species + habitat | species table; habitat for target and Overfished species; stock penalty; full Headroom and score; trip cap |
-| 6 | Ocean layers | Copernicus WMTS chlorophyll, sea temperature, waves |
-| 7 | Dark vessels | latest GFW European layer |
+| 5 | Species + habitat | species table; habitat for target and Overfished species; stock penalty; full Headroom and score; trip cap (habitat map layer deferred) |
+| 6 | Ocean layers | Copernicus WMTS chlorophyll, sea temperature, waves (fish fronts layer done early, in slice 5) |
+| 7 | Dark vessels | latest 7 days of GFW radar detections without AIS, Europe (done 30 Oct 2026) |
 | 8 | Invest screen | investment proposals; cap check; Validate action |
 | 9 | Monitor screen | trip log; replaced vs added; trips against cap; demo data |
 | 10 | UI pass + pitch | `ui-ux-pro-max` design pass; pitch materials |
@@ -257,7 +274,6 @@ The build rerun after 1–2 only fetches waves for newly placed ports (per-harbo
 - Azorean pescatourism licence limits (DLR 36/2008/A; RAMTA DLR 23/2007/A): distance, sea state, passengers, hours.
 - Which FLAG covers which islands.
 - Why EMODnet cells near most Azorean harbours are empty (no vessels of 12 m and over, or withheld by ICES for confidentiality).
-- ICCAT status for bigeye and North Atlantic albacore.
-- Access to AquaMaps species ranges.
+- Habitat map layer (generated image) for the target species; deferred from slice 5.
 - Daylight-dependent or per-harbour trip windows.
 

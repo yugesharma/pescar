@@ -1,6 +1,8 @@
 import * as maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useEffect, useRef, useState } from 'react'
+import type { Feature, Point } from 'geojson'
+import { fmtBearing, NM, rangeBearing, ring, type LngLat } from './geo.ts'
 
 type Trip = { date: string; worst_hs_m: number; status: 'GO' | 'MARGINAL' | 'NO-GO' }
 type Summary = {
@@ -11,8 +13,10 @@ type Harbour = Summary & {
   cell_km: number; shoulder_days: number; coords: string; rank: number; of: number
   small_boats: number; places: number; transport_km: number; transport: string
   community: number; boats_part: number; tourism_part: number; viability: number; income: number
-  fishing_hours: number | null; headroom: number | null
-  weekly: { week: number; viability: number }[]; trips: Trip[]
+  fishing_hours: number | null; headroom: number | null; stock_penalty: number | null
+  attractiveness: number | null; habitat_share: number | null
+  weekly: { week: number; viability: number; trip_cap: number | null }[]; trips: Trip[]
+  species: { name: string; scientific: string; status: 'Overfished' | 'Unknown' | 'Healthy'; source: string; year: number | null; target: number; share: number | null }[]
 }
 type Data = { limit_m: number; meta: Record<string, string>; harbours: Summary[] }
 
@@ -26,6 +30,9 @@ const VIEWS: Record<'azores' | 'europe', { center: [number, number]; zoom: numbe
   azores: { center: [-28, 38.4], zoom: 6.3 }, europe: { center: [12, 50], zoom: 3.4 },
 }
 const TOP = 100  // Europe list length; the map shows every harbour
+// Range tool: centre, cursor or pinned target. Kept in a ref because map handlers are registered once.
+type Range = { on: boolean; center?: LngLat; target?: LngLat; pinned: boolean }
+type Label = { x: number; y: number; text: string }
 const countryName = new Intl.DisplayNames(['en'], { type: 'region' })
 // Scope: all of Europe, one country (ISO code), or one NUTS 2 region in it; filters the list and the map.
 type Scope = { cc: string; region: string }  // cc 'europe' = everything; region '' = whole country
@@ -33,11 +40,39 @@ const PILOT: Scope = { cc: 'PT', region: 'PT20' }  // Região Autónoma dos Aço
 const inScope = ({ cc, region }: Scope) => (x: Summary) => cc === 'europe' || (x.cc === cc && (!region || x.region === region))
 const counts = <K,>(xs: K[]) => { const m = new Map<K, number>(); for (const x of xs) m.set(x, (m.get(x) ?? 0) + 1); return m }
 const fmt = (v: number) => v.toFixed(2)
+const pct = (v: number) => `${Math.round(v * 100)}%`
 // EMODnet static-gear fishing hours (ICES VMS, vessels of 12 m and over); latest ICES edition per ecoregion.
 const EMODNET = 'https://ows.emodnet-humanactivities.eu/wms?service=WMS&version=1.1.1&layers=emodnet:fishingstaticgears'
 const PRESSURE_TILES = `${EMODNET}&request=GetMap&styles=&format=image/png&transparent=true&srs=EPSG:3857&width=256&height=256`
   + `&bbox={bbox-epsg-3857}&CQL_FILTER=${encodeURIComponent("fo_year=2025 OR (ecoregn='Celtic Seas' AND fo_year=2024)")}`
 const PRESSURE_LEGEND = `${EMODNET.replace('layers=', 'layer=')}&request=GetLegendGraphic&format=image/png`
+// Copernicus Marine WMTS, live. Each layer shows its dataset's default time (the step nearest now), read from the
+// dataset's own capabilities so the tiles and the label agree. Colour ranges chosen with the user.
+const CMEMS = 'https://wmts.marine.copernicus.eu/teroWmts'
+const OCEAN = [
+  { id: 'chl', name: 'Chlorophyll', style: 'cmap:algae,logScale,range:0.05/2',
+    layer: 'OCEANCOLOUR_GLO_BGC_L4_NRT_009_102/cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-multi-4km_P1D_202311/CHL' },
+  { id: 'thetao', name: 'Sea temperature', style: 'cmap:thermal',
+    layer: 'GLOBAL_ANALYSISFORECAST_PHY_001_024/cmems_mod_glo_phy-thetao_anfc_0.083deg_P1D-m_202406/thetao' },
+  { id: 'waves', name: 'Wave height', style: 'cmap:amp,range:0/4', hourly: true,
+    layer: 'GLOBAL_ANALYSISFORECAST_WAV_001_027/cmems_mod_glo_wav_anfc_0.083deg_PT3H-i_202411/VHM0' },
+]
+// Dark vessels: GFW radar detections without AIS, dot area ∝ detections per 0.1° cell. Amber passes the palette
+// validator against the harbour blue and the fronts red.
+const DARK = '#c98500'
+const darkRadius = (n: maplibregl.ExpressionSpecification) =>  // the legend computes the same line
+  ['interpolate', ['linear'], ['sqrt', n], 1, 3, 7, 10] as maplibregl.ExpressionSpecification
+const DARK_KEY = [1, 5, 20]
+const dayMonth = (d: string) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' })
+const oceanQuery = (o: typeof OCEAN[number]) => `${CMEMS}?SERVICE=WMTS&LAYER=${o.layer}&STYLE=${o.style}`
+async function latestTime(layer: string) {
+  const dataset = layer.slice(0, layer.lastIndexOf('/'))
+  const xml = new DOMParser().parseFromString(
+    await (await fetch(`${CMEMS}/${dataset}?SERVICE=WMTS&REQUEST=GetCapabilities`)).text(), 'text/xml')
+  const dim = [...xml.getElementsByTagNameNS('*', 'Dimension')]
+    .find(d => d.getElementsByTagNameNS('*', 'Identifier')[0]?.textContent === 'time')
+  return dim?.getElementsByTagNameNS('*', 'Default')[0]?.textContent ?? undefined
+}
 
 export default function App() {
   const [limit, setLimit] = useState(1.5)
@@ -47,6 +82,14 @@ export default function App() {
   const h = loaded?.code === code ? loaded : undefined  // never show the previous harbour
   const [scope, setScope] = useState<Scope>(PILOT)
   const [pressure, setPressure] = useState(false)
+  const [fronts, setFronts] = useState(false)
+  const [ocean, setOcean] = useState<Record<string, boolean>>({})
+  const [times, setTimes] = useState<Record<string, string>>({})
+  const [dark, setDark] = useState(false)
+  const [darkDates, setDarkDates] = useState<string>()
+  const [ranging, setRanging] = useState(false)
+  const [label, setLabel] = useState<Label>()
+  const rng = useRef<Range>({ on: false, pinned: false })
   const mapEl = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map>(null)
   const all = data?.harbours ?? []  // ranked by score
@@ -83,6 +126,14 @@ export default function App() {
     m.on('load', () => {
       m.addSource('pressure', { type: 'raster', tiles: [PRESSURE_TILES], tileSize: 256, attribution: 'EMODnet Human Activities, ICES' })
       m.addLayer({ id: 'pressure', type: 'raster', source: 'pressure', layout: { visibility: 'none' }, paint: { 'raster-opacity': 0.8 } })
+      m.addSource('dark', { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, attribution: 'Global Fishing Watch' })
+      m.addLayer({ id: 'dark', type: 'circle', source: 'dark', layout: { visibility: 'none' }, paint: {
+        'circle-color': DARK, 'circle-opacity': 0.85, 'circle-radius': darkRadius(['get', 'detections']),
+        'circle-stroke-width': 1, 'circle-stroke-color': '#fff' } })
+      const tip = new maplibregl.Popup({ closeButton: false, closeOnClick: false })
+      m.on('mousemove', 'dark', e => { if (!rng.current.on) tip.setLngLat(e.lngLat)
+        .setText(((n: number) => `${n} radar detection${n === 1 ? '' : 's'} without AIS`)(e.features![0].properties.detections)).addTo(m) })
+      m.on('mouseleave', 'dark', () => tip.remove())
       // Clusters below zoom 8; each is coloured by the best harbour score inside it.
       m.addSource('harbours', {
         type: 'geojson', data: { type: 'FeatureCollection', features: [] },
@@ -110,15 +161,39 @@ export default function App() {
         id: 'pilot', type: 'circle', source: 'pilot',
         paint: { 'circle-radius': 9, 'circle-color': color('score'), 'circle-stroke-width': 2, 'circle-stroke-color': '#1f1f1e' },
       })
+      // Range tool: drawn on top of everything.
+      m.addSource('range', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+      m.addLayer({ id: 'range-rings', type: 'line', source: 'range', filter: ['has', 'ring'],
+        paint: { 'line-color': '#1f1f1e', 'line-opacity': 0.5, 'line-width': 1, 'line-dasharray': [4, 3] } })
+      m.addLayer({ id: 'range-line', type: 'line', source: 'range', filter: ['==', ['geometry-type'], 'LineString'],
+        paint: { 'line-color': '#1f1f1e', 'line-width': ['case', ['has', 'ring'], 0, 2] } })
+      m.addLayer({ id: 'range-centre', type: 'circle', source: 'range', filter: ['==', ['geometry-type'], 'Point'],
+        paint: { 'circle-radius': 4, 'circle-color': '#1f1f1e', 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' } })
+      // Click 1 sets the centre (snaps to a harbour), click 2 pins the target, click 3 starts again.
+      m.on('click', e => {
+        const r = rng.current
+        if (!r.on) return
+        const hit = m.queryRenderedFeatures(e.point, { layers: ['pilot', 'harbours'] })[0]
+        const pt = hit ? (hit.geometry as Point).coordinates as LngLat : [e.lngLat.lng, e.lngLat.lat] as LngLat
+        if (!r.center || r.pinned) Object.assign(r, { center: pt, target: undefined, pinned: false })
+        else Object.assign(r, { target: pt, pinned: true })
+        drawRange(m, r, setLabel)
+      })
+      m.on('mousemove', e => {
+        const r = rng.current
+        if (r.on && r.center && !r.pinned) { r.target = [e.lngLat.lng, e.lngLat.lat]; drawRange(m, r, setLabel) }
+      })
+      m.on('move', () => { if (rng.current.target) drawRange(m, rng.current, setLabel) })  // keep the label on its point
       m.on('click', 'clusters', async e => {
+        if (rng.current.on) return
         const f = e.features![0]
         const zoom = await (m.getSource('harbours') as maplibregl.GeoJSONSource).getClusterExpansionZoom(f.properties.cluster_id)
         m.easeTo({ center: (f.geometry as unknown as { coordinates: [number, number] }).coordinates, zoom })
       })
-      for (const id of ['harbours', 'pilot']) m.on('click', id, e => setCode(e.features![0].properties.code))
+      for (const id of ['harbours', 'pilot']) m.on('click', id, e => { if (!rng.current.on) setCode(e.features![0].properties.code) })
       for (const id of ['harbours', 'pilot', 'clusters']) {
         m.on('mouseenter', id, () => (m.getCanvas().style.cursor = 'pointer'))
-        m.on('mouseleave', id, () => (m.getCanvas().style.cursor = ''))
+        m.on('mouseleave', id, () => (m.getCanvas().style.cursor = rng.current.on ? 'crosshair' : ''))
       }
       map.current = m
       showHarbours(m, inViewRef.current)
@@ -127,7 +202,53 @@ export default function App() {
   }, [])
 
   useEffect(() => { if (map.current) showHarbours(map.current, inViewRef.current) }, [data, scope])
+  useEffect(() => {  // range tool on/off; R toggles, Esc leaves
+    const m = map.current
+    rng.current = { on: ranging, pinned: false }
+    if (m) { m.getCanvas().style.cursor = ranging ? 'crosshair' : ''; drawRange(m, rng.current, setLabel) }
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement).closest('select, textarea, input:not([type=checkbox])')) return  // typing, not a ticked box
+      if (e.key === 'r' || e.key === 'R') setRanging(v => !v)
+      if (e.key === 'Escape') setRanging(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [ranging])
   useEffect(() => { map.current?.setLayoutProperty('pressure', 'visibility', pressure ? 'visible' : 'none') }, [pressure])
+  useEffect(() => {  // added once the build's corners are known; under the harbours
+    const m = map.current, corners = data?.meta.fronts_corners
+    if (!m || !corners) return
+    if (!m.getSource('fronts')) {
+      m.addSource('fronts', { type: 'image', url: '/api/layers/fronts.png', coordinates: JSON.parse(corners) })
+      m.addLayer({ id: 'fronts', type: 'raster', source: 'fronts', paint: { 'raster-resampling': 'nearest' } }, 'dark')
+    }
+    m.setLayoutProperty('fronts', 'visibility', fronts ? 'visible' : 'none')
+  }, [fronts, data])
+  useEffect(() => {  // fetched on first use; the backend refreshes it once a day
+    const m = map.current
+    if (!m) return
+    if (dark && !darkDates) fetch('/api/layers/dark.geojson').then(r => r.json()).then(g => {
+      (m.getSource('dark') as maplibregl.GeoJSONSource).setData(g)
+      setDarkDates(`${dayMonth(g.start).replace(g.start.slice(5, 7) === g.end.slice(5, 7) ? / .*/ : /$/, '')}–${dayMonth(g.end)}`)
+    })
+    m.setLayoutProperty('dark', 'visibility', dark ? 'visible' : 'none')
+  }, [dark, darkDates])
+  useEffect(() => {
+    for (const o of OCEAN) latestTime(o.layer).then(t => t && setTimes(v => ({ ...v, [o.id]: t })))
+  }, [])
+  useEffect(() => {  // added once its time is known; under the fronts and the harbours
+    const m = map.current
+    if (!m) return
+    for (const o of OCEAN) {
+      if (!times[o.id]) continue
+      if (!m.getSource(o.id)) {
+        m.addSource(o.id, { type: 'raster', tileSize: 256, attribution: 'Copernicus Marine Service', tiles: [oceanQuery(o)
+          + `&REQUEST=GetTile&TILEMATRIXSET=EPSG:3857&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&FORMAT=image/png&TIME=${times[o.id]}`] })
+        m.addLayer({ id: o.id, type: 'raster', source: o.id, paint: { 'raster-opacity': 0.8 } }, m.getLayer('fronts') ? 'fronts' : 'dark')
+      }
+      m.setLayoutProperty(o.id, 'visibility', ocean[o.id] ? 'visible' : 'none')
+    }
+  }, [ocean, times])
 
   const europe = scope.cc === 'europe'
   const shown = europe ? inView.slice(0, TOP) : inView
@@ -135,7 +256,16 @@ export default function App() {
 
   return (
     <div className="app">
-      <div className="map" ref={mapEl} />
+      <div className="map-wrap">
+        <div className="map" ref={mapEl} />
+        <button className="range-btn" aria-pressed={ranging} onClick={() => setRanging(v => !v)}
+          title="Range and bearing (R). Click a centre, then a target; Esc to leave.">
+          ⌖ Range & bearing{ranging && (!rng.current.center || rng.current.pinned ? ' · click a centre' : ' · click to pin')}
+        </button>
+        {label && <div className="range-label" style={{ left: label.x, top: label.y }}>
+          <b>{label.text}</b>
+        </div>}
+      </div>
       <aside className="panel">
         <h1>PescaMare</h1>
         <label className="muted scope">Country{' '}
@@ -158,6 +288,27 @@ export default function App() {
         <label className="muted scope"><input type="checkbox" checked={pressure} onChange={e => setPressure(e.target.checked)} />{' '}
           Fishing intensity, static gears (EMODnet)</label>
         {pressure && <img height={150} src={PRESSURE_LEGEND} alt="Legend: average MW fishing hours per 0.05° cell" />}
+        <label className="muted scope"><input type="checkbox" checked={fronts} onChange={e => setFronts(e.target.checked)} />{' '}
+          Fish fronts, sea temperature × chlorophyll{data && ` (${data.meta.fronts_dates})`}</label>
+        {fronts && <p className="muted">
+          <span className="swatch" style={{ background: 'rgb(214,40,40)' }} /> temperature front{' '}
+          <span className="swatch" style={{ background: 'rgb(37,99,235)' }} /> front head-on with chlorophyll (upwelling)
+        </p>}
+        <label className="muted scope"><input type="checkbox" checked={dark} onChange={e => setDark(e.target.checked)} />{' '}
+          Dark vessels, radar detections without AIS (Global Fishing Watch{darkDates && `, ${darkDates}`})</label>
+        {dark && <p className="muted">
+          {DARK_KEY.map(n => { const r = 3 + 7 * (Math.sqrt(n) - 1) / 6; return <span key={n}>
+            <svg width={2 * r + 2} height={2 * r + 2} style={{ verticalAlign: 'middle' }}><circle cx={r + 1} cy={r + 1} r={r} fill={DARK} /></svg>
+            {' '}{n}{' '}</span> })}
+          detections per 0.1° cell · not evidence of illegal activity
+        </p>}
+        {OCEAN.map(o => <div key={o.id}>
+          <label className="muted scope"><input type="checkbox" checked={!!ocean[o.id]}
+            onChange={e => setOcean(v => ({ ...v, [o.id]: e.target.checked }))} />{' '}
+            {o.name} (Copernicus Marine{times[o.id] && `, ${o.hourly ? `${times[o.id].slice(0, 16).replace('T', ' ')} UTC` : times[o.id].slice(0, 10)}`})</label>
+          {ocean[o.id] && <img height={220} alt={`Legend: ${o.name}`}
+            src={`${oceanQuery(o)}&REQUEST=GetLegend&FORMAT=${encodeURIComponent('image/svg+xml')}`} />}
+        </div>)}
 
         {code ? (h ? <Detail h={h} limit={limit} onBack={() => setCode(undefined)} /> : <p className="muted">Loading…</p>) : <>
           <h2>Harbour score</h2>
@@ -176,7 +327,7 @@ export default function App() {
         </>}
 
         {data && <p className="muted">
-          Sources: Copernicus Marine, EU Fleet Register, OpenStreetMap, Global Fishing Watch, EMODnet.
+          Sources: Copernicus Marine, EU Fleet Register, OpenStreetMap, Global Fishing Watch, EMODnet, ICES, ICCAT, AquaMaps, FishBase.
           Built {data.meta.built_at}.
         </p>}
       </aside>
@@ -219,10 +370,14 @@ function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () =>
     <Factor name="Community" value={h.community}
       note={`${h.small_boats} small boats · ${h.places} places to stay within 10 km · ${h.transport || 'airport/ferry'} ${h.transport_km} km`} />
     <Factor name="Viability" value={h.viability} note="viable days per year at 1.5 m, vs the best harbour in Europe" />
-    <Factor name="Attractiveness" note="habitat for target species: coming next" />
+    <Factor name="Attractiveness" value={h.attractiveness ?? undefined} note={h.habitat_share === null
+      ? 'pilot harbours only'
+      : `${pct(h.habitat_share)} of the trip area is target-species habitat, year average`} />
     <Factor name="Headroom" value={h.headroom ?? undefined} note={h.fishing_hours === null
       ? 'pilot harbours only'
-      : `${Math.round(h.fishing_hours)} AIS fishing hours / year within 6 nm`} />
+      : `${Math.round(h.fishing_hours)} AIS fishing hours / year within 6 nm · stock penalty ${fmt(h.stock_penalty!)}`} />
+    {h.headroom !== null && <p className="muted">Trip cap per licensed boat:{' '}
+      {Math.min(...h.weekly.map(w => w.trip_cap!))}–{Math.max(...h.weekly.map(w => w.trip_cap!))} trips / week at {limit.toFixed(1)} m</p>}
     <h2>Waves at {limit.toFixed(1)} m</h2>
     <div className="stats">
       <div><b>{Math.round(h.viable_days)}</b><span className="muted">viable days / year</span></div>
@@ -231,6 +386,17 @@ function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () =>
     <h2>Season curve</h2>
     <p className="muted">Share of viable days by week of the year at {limit.toFixed(1)} m. Shaded: shoulder season.</p>
     <SeasonCurve key={`${h.code}-${limit}`} weekly={h.weekly} />
+    {h.species.some(s => s.share !== null) && <>
+      <h2>Species</h2>
+      <table><tbody>{h.species.map(s => (
+        <tr key={s.name}>
+          <td><span title={s.scientific}>{s.name}</span>{s.target ? <span className="muted"> · target</span> : ''}<br />
+            <span className="muted">{s.source}{s.year ? `, ${s.year}` : ''}</span></td>
+          <td className="muted" style={{ whiteSpace: 'nowrap', padding: '0 8px' }}>{s.share === null ? '' : `${pct(s.share)} habitat`}</td>
+          <td><span className={`status ${s.status}`}>{s.status}</span></td>
+        </tr>))}
+      </tbody></table>
+    </>}
     {h.trips.length > 0 && <h2>Next 3 days</h2>}
     <table><tbody>{h.trips.map(t => (
       <tr key={t.date}>
@@ -274,4 +440,20 @@ function SeasonCurve({ weekly }: { weekly: Harbour['weekly'] }) {
     </svg>
     <p className="muted">{hover ? `Week ${hover.week}: ${Math.round(hover.viability * 100)}% of days viable` : 'Hover the curve for weekly values.'}</p>
   </>)
+}
+
+function drawRange(m: maplibregl.Map, r: Range, setLabel: (l?: Label) => void) {
+  const line = (coordinates: LngLat[], properties = {}) =>
+    ({ type: 'Feature' as const, properties, geometry: { type: 'LineString' as const, coordinates } })
+  const features: Feature[] = []
+  const rb = r.on && r.center && r.target ? rangeBearing(r.center, r.target) : undefined
+  if (r.on && r.center) {
+    features.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: r.center } })
+    // ring through the target: follows the cursor
+    if (rb) features.push(line(ring(r.center, rb.m), { ring: 1 }), line([r.center, r.target!]))
+  }
+  (m.getSource('range') as maplibregl.GeoJSONSource | undefined)?.setData({ type: 'FeatureCollection', features })
+  if (!rb) return setLabel(undefined)
+  const p = m.project(r.target!)
+  setLabel({ x: p.x, y: p.y, text: `${(rb.m / NM).toFixed(1)} nm · ${fmtBearing(rb.bearing)}` })
 }

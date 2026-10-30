@@ -5,8 +5,12 @@ Run:  uv run uvicorn api:app --reload
 import sqlite3
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 
+import dark
 from build import DB
+from fronts import PNG
+from scoring import trip_cap
 from waves import LIMITS, status
 
 app = FastAPI(title="PescaMare")
@@ -40,11 +44,30 @@ def harbour(code: str, limit: float = 1.5):
                  "FROM harbours h JOIN viable_days d USING (code) WHERE code = ? AND d.limit_m = ?", code, limit)
     if not found:
         raise HTTPException(404, f"no harbour {code}")
-    rank = rows("SELECT COUNT(*) + 1 AS r FROM harbours WHERE score > ?", found[0]["score"])[0]["r"]
-    return found[0] | {
+    h = found[0]
+    rank = rows("SELECT COUNT(*) + 1 AS r FROM harbours WHERE score > ?", h["score"])[0]["r"]
+    return h | {
         "rank": rank, "of": rows("SELECT COUNT(*) AS n FROM harbours")[0]["n"],
-        "weekly": rows("SELECT week, viability FROM viability_weekly WHERE code = ? AND limit_m = ? ORDER BY week",
-                       code, limit),
+        # trip cap for one licensed boat; the proposal's boat count comes with the Invest screen
+        "weekly": [r | {"trip_cap": None if h["headroom"] is None else trip_cap(1, 7 * r["viability"], h["headroom"])}
+                   for r in rows("SELECT week, viability FROM viability_weekly WHERE code = ? AND limit_m = ? ORDER BY week",
+                                 code, limit)],
+        "species": rows("SELECT s.name, s.scientific, s.status, s.source, s.year, s.target, AVG(x.share) AS share "
+                        "FROM species s LEFT JOIN habitat x ON x.species = s.name AND x.code = ? GROUP BY s.name "
+                        "ORDER BY s.target DESC, CASE s.status WHEN 'Overfished' THEN 0 WHEN 'Unknown' THEN 1 ELSE 2 END, s.name",
+                        code),
         "trips": [r | {"status": status(r["worst_hs_m"], limit)}
                   for r in rows("SELECT date, worst_hs_m FROM forecast WHERE code = ? ORDER BY date", code)],
     }
+
+
+@app.get("/api/layers/fronts.png")
+def fronts():
+    """SST/chlorophyll fronts image for the pilot area; corners and dates are in /api/harbours meta."""
+    return FileResponse(PNG, media_type="image/png", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/layers/dark.geojson")
+def dark_vessels():
+    """GFW radar detections without AIS, last 7 published days; window in the top-level start/end."""
+    return FileResponse(dark.latest(), media_type="application/geo+json", headers={"Cache-Control": "no-cache"})
