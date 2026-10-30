@@ -73,6 +73,7 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
   - French outermost regions (segments `4F*`) are excluded; the Azores, Madeira and the Canaries are kept.
   - Coordinates: UN/LOCODE first (613 ports), then the port name matched within its country in GeoNames.
   - Ports with no sea cell within 20 km are dropped (inland, lake or mismatched); the app reports how many were placed and dropped.
+  - A harbour whose model cell is more than ~one grid cell (9 km) away gets a warning in its detail panel.
 - The **pilot harbours** are the **11 Azorean ports of registration**, all with UN/LOCODE coordinates:
   - EU Fleet Register segments `4K9` and `4KA`;
   - current records, i.e. `Event End Date` = 2100-12-31;
@@ -101,6 +102,7 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 - Community is the average of two parts, each divided by the best harbour's value:
   - **Small boats:** under 12 m, `Licence Indicator` = Y.
   - **Tourism access:** the number of OpenStreetMap accommodation places within 10 km (hotels, guesthouses, campsites, apartments; OSM rarely records beds), and distance to the nearest airport or ferry terminal. One query per country, counted locally around each harbour; the same method everywhere.
+    - Tourism access = (accommodation places ÷ best harbour's + closeness ÷ best harbour's) / 2, where closeness = 1 / (1 + km / 10): a ferry terminal or airport (OSM `iata`-tagged aerodromes) 10 km away counts half as much as one next door.
 - FLAG support is left out until the Azores FLAG is identified.
 
 ### Headroom (F4)

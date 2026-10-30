@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
+import community
+import scoring
 import waves
 
 DATA = Path(__file__).parent / "data"
@@ -39,12 +41,20 @@ def pilot_harbours() -> pd.DataFrame:
 def main():
     harbours = pilot_harbours()
     w = waves.run(harbours)
-    harbours = harbours.merge(w.pop("cells"), on="code")
+    harbours = harbours.merge(w.pop("cells"), on="code").merge(community.run(harbours), on="code")
+    default = w["viable_days"].query("limit_m == 1.5")[["code", "per_year"]]
+    harbours = pd.DataFrame(scoring.score(
+        harbours.merge(default.rename(columns={"per_year": "viable_days"})).to_dict("records"))
+    ).drop(columns="viable_days")  # per-limit values live in the viable_days table
     meta = pd.DataFrame([
         ("built_at", pd.Timestamp.now(tz="UTC").isoformat(timespec="minutes")),
         ("wave_product", waves.HIRES),
         ("wave_history", f"{waves.HISTORY_START} to {w['forecast'].date.min()}"),
         ("trip_window", "08:00-14:59 local"),
+        ("osm", "OpenStreetMap via Overpass, cached " + ", ".join(
+            pd.Timestamp((community.CACHE / f"osm_{cc}.json").stat().st_mtime, unit="s").strftime(f"{cc} %Y-%m-%d")
+            for cc in sorted(harbours.code.str[:2].unique()))),
+        ("fleet", "EU Fleet Register, current records"),
     ], columns=["key", "value"])
     tmp = DB.with_suffix(".tmp")
     tmp.unlink(missing_ok=True)

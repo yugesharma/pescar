@@ -22,3 +22,7 @@ td { padding: 4px 0; }
 .legend { height: 8px; border-radius: 4px; margin-top: 8px; }
 .legend-labels { display: flex; justify-content: space-between; }
 .warning { background: #fff4dc; border-left: 4px solid #fab219; padding: 6px 8px; font-size: 13px; }
+.factor { margin: 10px 0; }
+.factor-head { display: flex; justify-content: space-between; font-size: 14px; }
+.track { height: 8px; border-radius: 4px; background: #cde2fb; margin: 3px 0; }
+.fill { height: 100%; border-radius: 4px; background: #2a78d6; }

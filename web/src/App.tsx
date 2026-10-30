@@ -6,6 +6,9 @@ type Trip = { date: string; worst_hs_m: number; status: 'GO' | 'MARGINAL' | 'NO-
 type Harbour = {
   code: string; name: string; lat: number; lon: number; cell_km: number
   viable_days: number; shoulder_days: number
+  small_boats: number; places: number; transport_km: number; transport: string
+  community: number; boats_part: number; tourism_part: number; viability: number
+  score: number; limiting: string; income: number
   weekly: { week: number; viability: number }[]; trips: Trip[]
 }
 type Data = { limit_m: number; meta: Record<string, string>; harbours: Harbour[] }
@@ -13,10 +16,10 @@ type Data = { limit_m: number; meta: Record<string, string>; harbours: Harbour[]
 const LIMITS = [1.0, 1.5, 2.0]
 const FAR_KM = 9  // ~one 0.083° grid cell; closer than this is normal for a coastal harbour
 const BLUE = '#2a78d6'
-// Sequential blue (light -> dark) for viable days per year. Fixed stops, so colours
-// mean the same at every wave limit (and later across Europe).
-const STOPS: [number, string][] = [[0, '#cde2fb'], [100, '#86b6ef'], [200, '#256abf'], [300, '#0d366b']]
-const DOT_COLOR = ['interpolate', ['linear'], ['get', 'viable_days'], ...STOPS.flat()] as maplibregl.ExpressionSpecification
+// Sequential blue (light -> dark) for harbour score, 0-1 (best harbour in Europe = 1).
+const STOPS: [number, string][] = [[0, '#cde2fb'], [0.33, '#86b6ef'], [0.66, '#256abf'], [1, '#0d366b']]
+const DOT_COLOR = ['interpolate', ['linear'], ['get', 'score'], ...STOPS.flat()] as maplibregl.ExpressionSpecification
+const fmt = (v: number) => v.toFixed(2)
 
 export default function App() {
   const [limit, setLimit] = useState(1.5)
@@ -53,7 +56,7 @@ export default function App() {
 
   useEffect(() => { if (map.current && data) showHarbours(map.current, data) }, [data])
 
-  const ranked = [...(data?.harbours ?? [])].sort((a, b) => b.viable_days - a.viable_days)
+  const ranked = [...(data?.harbours ?? [])].sort((a, b) => b.score - a.score)
   const h = data?.harbours.find(x => x.code === code)
 
   return (
@@ -68,12 +71,13 @@ export default function App() {
         </label>
 
         {h ? <Detail h={h} limit={limit} onBack={() => setCode(undefined)} /> : <>
-          <h2>Viable days per year</h2>
+          <h2>Harbour score</h2>
           <div className="legend" style={{ background: `linear-gradient(to right, ${STOPS.map(s => s[1]).join()})` }} />
-          <div className="legend-labels muted">{STOPS.map(([v]) => <span key={v}>{v}{v === 300 ? '+' : ''}</span>)}</div>
+          <div className="legend-labels muted">{STOPS.map(([v]) => <span key={v}>{fmt(v)}</span>)}</div>
+          <p className="muted">Community × Viability so far, each divided by the best harbour. A ranking, not an absolute measure.</p>
           <ol>{ranked.map(x => (
             <li key={x.code}><button onClick={() => setCode(x.code)}>
-              <span>{x.name}</span><span>{Math.round(x.viable_days)}</span>
+              <span>{x.name}<br /><span className="muted">{x.limiting}</span></span><span>{fmt(x.score)}</span>
             </button></li>))}
           </ol>
         </>}
@@ -81,7 +85,9 @@ export default function App() {
         {data && <p className="muted">
           Waves: Copernicus Marine {data.meta.wave_product}, {data.meta.wave_history}.
           A viable day has every 3-hourly Hs in the trip window ({data.meta.trip_window}) below the wave limit.
-          The 0.083° grid cannot resolve small coves. Built {data.meta.built_at}.
+          The 0.083° grid cannot resolve small coves.
+          Boats: {data.meta.fleet} (licensed, under 12 m, by port of registration; not always where boats work).
+          Tourism: {data.meta.osm}; OSM counts places, rarely beds. Built {data.meta.built_at}.
         </p>}
       </aside>
     </div>
@@ -93,9 +99,17 @@ function showHarbours(m: maplibregl.Map, data: Data) {
     type: 'FeatureCollection',
     features: data.harbours.map(h => ({
       type: 'Feature', geometry: { type: 'Point', coordinates: [h.lon, h.lat] },
-      properties: { code: h.code, viable_days: h.viable_days },
+      properties: { code: h.code, score: h.score },
     })),
   })
+}
+
+function Factor({ name, value, note }: { name: string; value?: number; note: string }) {
+  return <div className="factor">
+    <div className="factor-head"><span>{name}</span><span>{value === undefined ? '–' : fmt(value)}</span></div>
+    <div className="track">{value !== undefined && <div className="fill" style={{ width: `${value * 100}%` }} />}</div>
+    <div className="muted">{note}</div>
+  </div>
 }
 
 function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () => void }) {
@@ -106,6 +120,19 @@ function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () =>
       ⚠ Wave figures come from the nearest model sea cell, {h.cell_km} km from the harbour.
       Sea state there may differ from the harbour's own waters.
     </p>}
+    <div className="stats">
+      <div><b>{fmt(h.score)}</b><span className="muted">harbour score</span></div>
+      <div><b>€{h.income.toLocaleString('en-GB')}</b><span className="muted">income potential per boat / year</span></div>
+    </div>
+    <p><strong>{h.limiting[0].toUpperCase() + h.limiting.slice(1)}</strong></p>
+    <h2>Factors</h2>
+    <Factor name="Community" value={h.community}
+      note={`${h.small_boats} small boats · ${h.places} places to stay within 10 km · ${h.transport || 'airport/ferry'} ${h.transport_km} km`} />
+    <Factor name="Viability" value={h.viability} note="viable days per year at 1.5 m, vs the best harbour" />
+    <Factor name="Attractiveness" note="habitat for target species: coming next" />
+    <Factor name="Headroom" note="fishing pressure and stock status: coming next" />
+    <p className="muted">Score and income use the default 1.5 m wave limit. Income potential = viable days × €500 per trip-day.</p>
+    <h2>Waves at {limit.toFixed(1)} m</h2>
     <div className="stats">
       <div><b>{Math.round(h.viable_days)}</b><span className="muted">viable days / year</span></div>
       <div><b>{Math.round(h.shoulder_days)}</b><span className="muted">in shoulder season (of 152)</span></div>
