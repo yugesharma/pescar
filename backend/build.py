@@ -20,6 +20,7 @@ import habitat
 import pressure
 import scoring
 import species
+import tourism
 import waves
 
 DATA = Path(__file__).parent.parent / "data"
@@ -155,13 +156,14 @@ def main():
     h = h.merge(placed, on="code")
     h = h.merge(community.run(h), on="code")
     h = h.merge(pressure.run(h), on="code", how="left")
+    h = h.merge(tourism.run(h[h.pilot]), on="code", how="left")  # municipal nights: pilot harbours only
     hab = habitat.run(h, sp)
     year = hab.groupby(["code", "species"]).share.mean().reset_index()  # mean over the 12 months
     status = dict(zip(sp.name, sp.status))
     h["stock_shares"] = h.code.map({c: [(status[s], x) for s, x in zip(g.species, g.share)] for c, g in year.groupby("code")})
     # Judgement: Attractiveness = target species' habitat share, mean over the target species and months.
     h["habitat_share"] = h.code.map(year[year.species.isin(sp.name[sp.target])].groupby("code").share.mean())
-    for c in ["fishing_hours", "habitat_share", "stock_shares"]:  # None = partial score
+    for c in ["fishing_hours", "habitat_share", "stock_shares", "nights_per_resident"]:  # None = partial score
         h[c] = h[c].astype(object).where(h[c].notna(), None)
     default = w["viable_days"].query("limit_m == 1.5")[["code", "per_year"]]
     h = pd.DataFrame(scoring.score(
@@ -184,6 +186,8 @@ def main():
         ("species", "ICES Stock Assessment Graphs, ICCAT, GFCM SoMFi 2025, GBIF x Copernicus temperature, FishBase"),
         ("habitat", f"Copernicus Marine {habitat.TEMP}, {habitat.YEARS[0][:4]}-{habitat.YEARS[1][:4]}; EMODnet Bathymetry"),
         *layers.items(),
+        ("tourism", f"Eurostat {tourism.YEAR}, INE {tourism.YEAR}, ELSTAT {tourism.ELSTAT_YEAR} via INSETE, "
+                    "Inside Airbnb, GISCO LAU 2021"),
         ("pressure", f"Global Fishing Watch apparent fishing effort (AIS), {pressure.YEAR}, "
                      f"{pressure.PORT_KM}-{pressure.TRIP_KM:.0f} km from the harbour"),
     ], columns=["key", "value"])

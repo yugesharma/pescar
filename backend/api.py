@@ -19,7 +19,7 @@ import dark
 import mpa
 from build import DB
 from fronts import PNG
-from scoring import trip_cap
+from scoring import BANDS, CROWD_HALF, REACH_KM, TRANSPORT_HALF_KM, VISITOR_FLOOR, cap_boats, trip_cap
 from waves import LIMITS, status
 
 app = FastAPI(title="PescaMare")
@@ -86,7 +86,8 @@ def harbours(limit: float = 1.5):
     check(limit)
     meta = {r["key"]: r["value"] for r in rows("SELECT * FROM meta")}
     return {"limit_m": limit, "meta": meta, "harbours": rows(
-        "SELECT h.code, h.name, h.cc, h.region, h.region_name, h.lat, h.lon, h.pilot, h.score, h.limiting, d.per_year AS viable_days "
+        "SELECT h.code, h.name, h.cc, h.region, h.region_name, h.lat, h.lon, h.pilot, h.score, h.limiting, d.per_year AS viable_days, "
+        "h.small_boats, h.nights_per_resident "
         "FROM harbours h JOIN viable_days d USING (code) WHERE d.limit_m = ? ORDER BY h.score DESC", limit)}
 
 
@@ -100,17 +101,19 @@ def harbour(code: str, limit: float = 1.5):
     h = found[0]
     rank = rows("SELECT COUNT(*) + 1 AS r FROM harbours WHERE score > ?", h["score"])[0]["r"]
     weekly = rows("SELECT week, viability FROM viability_weekly WHERE code = ? AND limit_m = ? ORDER BY week", code, limit)
-    caps = lambda boats: [None if h["headroom"] is None else trip_cap(boats, 7 * w["viability"], h["headroom"]) for w in weekly]
-    proposals = [p | {"income": h["income"] * p["boats"], "caps": c,
-                      "over_weeks": [w["week"] for w, cap in zip(weekly, c) if cap is not None and p["target"] > cap]}
-                 for p in user("SELECT * FROM proposals WHERE code = ? ORDER BY id DESC", code) for c in [caps(p["boats"])]]
+    # One cap per harbour, sized by its registered boats; proposals use it up, never raise it.
+    boats = cap_boats(h["small_boats"])
+    caps = [None if h["headroom"] is None else trip_cap(boats, 7 * w["viability"], h["headroom"]) for w in weekly]
+    proposals = [p | {"income": h["income"] * p["boats"], "caps": caps,
+                      "over_weeks": [w["week"] for w, cap in zip(weekly, caps) if cap is not None and p["target"] > cap]}
+                 for p in user("SELECT * FROM proposals WHERE code = ? ORDER BY id DESC", code)]
     validation = (user("SELECT date, boats FROM validations WHERE code = ?", code) or [None])[0]
     active = bool(user("SELECT 1 FROM trips WHERE code = ? LIMIT 1", code))
     return h | {
         "rank": rank, "of": rows("SELECT COUNT(*) AS n FROM harbours")[0]["n"],
         "state": "Active" if active else "Validated" if validation else "Proposed" if proposals else "Candidate",
-        "proposals": proposals, "validation": validation,
-        "weekly": [w | {"trip_cap": c} for w, c in zip(weekly, caps(1))],  # trip cap for one licensed boat
+        "proposals": proposals, "validation": validation, "cap_boats": boats,
+        "weekly": [w | {"trip_cap": c} for w, c in zip(weekly, caps)],
         "species": rows("SELECT s.name, s.scientific, s.status, s.source, s.year, s.target, AVG(x.share) AS share "
                         "FROM species s LEFT JOIN habitat x ON x.species = s.name AND x.code = ? WHERE s.region = ? GROUP BY s.name "
                         "ORDER BY s.target DESC, CASE s.status WHEN 'Overfished' THEN 0 WHEN 'Unknown' THEN 1 ELSE 2 END, s.name",
@@ -118,6 +121,20 @@ def harbour(code: str, limit: float = 1.5):
         "trips": [r | {"status": status(r["worst_hs_m"], limit)}
                   for r in rows("SELECT date, worst_hs_m FROM forecast WHERE code = ? ORDER BY date", code)],
     }
+
+
+TOURISM = ("code, name, region, region_name, muni_name, nuts3, level, residents, rental_nights, hotel_nights, nights, "
+           "nights_per_resident, peak_month, peak_nights_per_resident, region_nights_per_resident, group_name, group_nights, "
+           "group_share, reviews, nights_per_review, hidden_cells, places, transport, transport_km, airport, airport_km, "
+           "airport_pax, band, tourism_fit, enough_visitors, reachable, not_crowded")
+
+
+@app.get("/api/tourism")
+def tourism():
+    """Pilot harbours' tourism numbers and the Tourism fit constants (ADR-0011). Sweet spot = Balanced or below, full Reachable."""
+    return {"params": dict(crowd_half=CROWD_HALF, visitor_floor=VISITOR_FLOOR, reach_km=REACH_KM,
+                           transport_half_km=TRANSPORT_HALF_KM, sweet_nights=BANDS[1][0]),
+            "harbours": rows(f"SELECT {TOURISM} FROM harbours WHERE pilot = 1 ORDER BY region, nights_per_resident")}
 
 
 def exists(code):
@@ -130,6 +147,13 @@ def propose(code: str, p: Proposal):
     exists(code)
     user("INSERT INTO proposals (code, boats, training, budget, target, notes, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
          code, p.boats, p.training, p.budget, p.target, p.notes.strip(), datetime.date.today().isoformat())
+    return {"ok": True}
+
+
+@app.delete("/api/harbours/{code}/proposals/{pid}")
+def unpropose(code: str, pid: int):
+    if not user("DELETE FROM proposals WHERE code = ? AND id = ? RETURNING id", code, pid):
+        raise HTTPException(404, f"no proposal {pid} at {code}")
     return {"ok": True}
 
 
@@ -171,7 +195,7 @@ def monitor(limit: float = 1.5):
     check(limit)
     out, today = [], datetime.date.today()
     for v in user("SELECT * FROM validations ORDER BY date"):
-        h = rows("SELECT code, name, headroom FROM harbours WHERE code = ?", v["code"])[0]
+        h = rows("SELECT code, name, headroom, small_boats FROM harbours WHERE code = ?", v["code"])[0]
         via = weekly_viability(v["code"], limit)
         trips = user("SELECT date, replaced, demo FROM trips WHERE code = ?", v["code"])
         start = datetime.date.fromisoformat(v["date"])
@@ -183,10 +207,10 @@ def monitor(limit: float = 1.5):
         for t in trips:
             weeks[monday(datetime.date.fromisoformat(t["date"]))] += 1
         weekly = [dict(start=m.isoformat(), trips=n,
-                       cap=None if h["headroom"] is None else trip_cap(v["boats"], 7 * via(m), h["headroom"]))
+                       cap=None if h["headroom"] is None else trip_cap(cap_boats(h["small_boats"]), 7 * via(m), h["headroom"]))
                   for m, n in weeks.items()]
         replaced = sum(t["replaced"] for t in trips)
-        out.append(h | dict(state="Active" if trips else "Validated", validated=v["date"], boats=v["boats"],
+        out.append({k: h[k] for k in ("code", "name", "headroom")} | dict(state="Active" if trips else "Validated", validated=v["date"], boats=v["boats"],
                             demo=bool(v["demo"] or any(t["demo"] for t in trips)), trips=len(trips),
                             replaced=replaced, added=len(trips) - replaced, expected_days=round(expected, 1),
                             used=round(len(trips) / expected, 4) if expected else None, weekly=weekly,
@@ -258,6 +282,12 @@ def test():
     pilot = rows("SELECT code FROM harbours WHERE pilot = 1 LIMIT 1")[0]["code"]
     other = rows("SELECT code FROM harbours WHERE pilot = 0 LIMIT 1")[0]["code"]
     get = lambda code: c.get(f"/api/harbours/{code}").json()
+    # Every pilot harbour's detail must serialise (an inf in the database once broke all Azores harbours).
+    assert all(c.get(f"/api/harbours/{r['code']}").status_code == 200 for r in rows("SELECT code FROM harbours WHERE pilot = 1"))
+
+    t = c.get("/api/tourism").json()
+    assert t["params"]["sweet_nights"] == 50 and len(t["harbours"]) == len(rows("SELECT code FROM harbours WHERE pilot = 1"))
+    assert all(x["nights_per_resident"] > 0 and x["band"] for x in t["harbours"]), t["harbours"][0]
 
     h = get(pilot)
     assert h["state"] == "Candidate" and h["proposals"] == [] and h["validation"] is None, h["state"]
@@ -274,7 +304,11 @@ def test():
     assert h["state"] == "Proposed" and len(high["over_weeks"]) == len(h["weekly"]) and zero["over_weeks"] == [], h
     assert high["income"] == 2 * h["income"] and high["notes"] == "x", high
     w = h["weekly"][0]
-    assert high["caps"][0] == trip_cap(2, 7 * w["viability"], h["headroom"]), high["caps"][0]
+    assert high["caps"] == zero["caps"] == [x["trip_cap"] for x in h["weekly"]], "cap must not depend on the proposal"
+    assert high["caps"][0] == trip_cap(h["cap_boats"], 7 * w["viability"], h["headroom"]), high["caps"][0]
+    assert c.delete(f"/api/harbours/{pilot}/proposals/{zero['id']}").status_code == 200
+    assert c.delete(f"/api/harbours/{pilot}/proposals/{zero['id']}").status_code == 404
+    assert [p["id"] for p in get(pilot)["proposals"]] == [high["id"]]
 
     assert c.post(f"/api/harbours/{pilot}/validation", json=dict(date="2026-10-30", boats=2)).status_code == 201
     assert c.post(f"/api/harbours/{pilot}/validation", json=dict(date="2026-10-31", boats=3)).status_code == 409
@@ -293,8 +327,8 @@ def test():
     assert len(m) == 1 and m[0]["code"] == pilot, m
     m = m[0]
     assert (m["state"], m["trips"], m["replaced"], m["added"], m["boats"], m["demo"]) == ("Active", 3, 2, 1, 2, False), m
-    # 3 trips in under a day of typical calm boat-days: more than 100% used.
-    assert 0 < m["expected_days"] < 3 and m["used"] > 1, m
+    # Used = trips / typical calm boat-days since validation (depends on the harbour's waves).
+    assert m["expected_days"] > 0 and m["used"] == round(3 / m["expected_days"], 4), m
     week = m["weekly"][-1]
     assert week["trips"] == 3 and m["over_weeks"] == int(week["trips"] > week["cap"]), m["weekly"]
 

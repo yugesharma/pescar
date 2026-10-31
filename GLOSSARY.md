@@ -13,7 +13,7 @@ One of the 11 Azorean harbours: the demo's focus, and the only harbours with a f
 _Avoid_: featured harbour, demo port
 
 **Partial score**:
-Community × Viability, shown for harbours outside the pilot until pressure and stock data exist for them.
+Geometric mean of Community, Viability and Tourism fit (Enough visitors × Reachable), shown for harbours outside the pilot until pressure, stock and crowding data exist for them.
 _Avoid_: preliminary score, basic score
 
 **Port of registration**:
@@ -47,12 +47,17 @@ _Avoid_: go/no-go flag, forecast status
 ## Harbour score
 
 **Harbour score**:
-Community × Viability × Attractiveness × Headroom, each divided by the best value across all European harbours so the best scores 1; a ranking, not an absolute measure.
+Geometric mean of Community, Viability, Attractiveness, Headroom and Tourism fit (the product of the factors present, to the power 1 ÷ their number; ADR-0012). Community, Viability and Attractiveness are divided by the best harbour's value so the best scores 1; Headroom and Tourism fit use fixed scales. A ranking, not an absolute measure.
 _Avoid_: investment score, rating, index
 
 **Community**:
-How able a harbour is to run trips: its active small-scale vessels (under 12 m), local support, and tourist access.
+How able a harbour is to run trips: its active small-scale vessels (under 12 m), on a log scale. Tourist access moved to Tourism fit (ADR-0011).
 _Avoid_: capacity, fleet score
+
+**Tourism fit**:
+Whether visitors can reach a harbour without it being crowded: Enough visitors × Reachable × Not crowded (ADR-0011). Enough visitors = places to stay within 10 km ÷ 10, at most 1; Reachable = 1 up to 5 km from an airport or ferry port, then 1 / (1 + extra km / 10); Not crowded = 1 / (1 + guest nights per resident a year / 20), pilot harbours only. Bands: Under-visited (under 10 nights per resident), Balanced (10–50), Busy (50–150), Crowded (150+).
+Sweet spot: Balanced or below and within 5 km of an airport or ferry port (shaded on the Tourism chart).
+_Avoid_: tourism score, popularity
 
 **Viable days per year**:
 Expected viable days in a year at the default wave limit (1.5 m); the input to the Viability factor and to income potential.
@@ -116,7 +121,7 @@ A trip day on which the boat would otherwise have gone commercial fishing; trips
 _Avoid_: substitution, swap day
 
 **Trip cap**:
-The most trips per week a harbour should run: licensed boats × viable days that week × Headroom, rounded down.
+The most trips per week a harbour should run, fixed per harbour: cap boats × viable days that week × Headroom, rounded down. Cap boats = 1 in 5 of the harbour's registered small boats, at least 1, at most 10. Proposals use the cap up; they never raise it.
 _Avoid_: quota, limit, carrying capacity
 
 **Trip**:

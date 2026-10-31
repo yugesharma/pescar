@@ -18,7 +18,8 @@ TRIP_HOURS = range(8, 15)     # trip window, local time, 08:00-14:59
 SHOULDER = [4, 5, 6, 9, 10]   # Apr-Jun, Sep-Oct
 SHOULDER_DAYS = 152           # days in those months
 MAX_KM = 20                   # no sea cell this close -> harbour dropped (inland, lake, mismatched)
-CACHE = Path(__file__).parent.parent / "data" / "cache" / "waves"   # non-pilot results; delete to refetch
+CACHE = Path(__file__).parent.parent / "data" / "cache" / "waves"   # history per harbour; delete to refetch
+PILOT_MAX_AGE = 30            # days; pilot history older than this is refetched (others: never)
 HIRES = "cmems_mod_glo_wav_anfc_0.083deg_PT3H-i"   # Nov 2022 -> +10 days
 LONG = "cmems_mod_glo_wav_my_0.2deg_PT3H-i"        # 1980 -> ~2 months ago
 HISTORY_START = "2022-11-01"
@@ -77,14 +78,31 @@ def hs_series(dataset_id, lat, lon, start, end):
 
 
 def harbour(h, live: bool) -> dict[str, list[dict]]:
-    """One harbour's rows for each table. live: fetch now and add the 3-day forecast (pilot);
-    otherwise history only, cached in CACHE so a rerun skips harbours already done."""
+    """One harbour's rows for each table, history cached in CACHE so a rerun skips harbours already done.
+    live (pilot): history refreshed after PILOT_MAX_AGE days, 3-day forecast fetched now."""
     path = CACHE / f"{h.code}.json"
-    if not live and path.exists():
-        return json.loads(path.read_text())
     today = pd.Timestamp.now(tz=h.tz).normalize()
     today_utc = today.tz_convert("UTC").tz_localize(None)
-    hs, cell = hs_series(HIRES, h.lat, h.lon, HISTORY_START, str((today + pd.Timedelta(days=4 if live else 0)).date()))
+    out = json.loads(path.read_text()) if path.exists() else None
+    if out and live and (today.tz_localize(None) - pd.Timestamp(out["cells"][0]["history_end"])).days > PILOT_MAX_AGE:
+        out = None
+    if out is None:
+        out = history(h, today, today_utc)
+        CACHE.mkdir(parents=True, exist_ok=True)
+        path.with_suffix(".tmp").write_text(json.dumps(out))
+        path.with_suffix(".tmp").replace(path)  # whole file or nothing, if the run is killed
+    out["forecast"] = forecast(h, today, today_utc) if live and out["viable_days"] else []
+    return out
+
+
+def forecast(h, today, today_utc) -> list[dict]:
+    hs, _ = hs_series(HIRES, h.lat, h.lon, str(today.date()), str((today + pd.Timedelta(days=4)).date()))
+    return [dict(code=h.code, date=str(d), worst_hs_m=round(float(w), 2))
+            for d, w in daily_worst(hs[hs.index >= today_utc], h.tz).head(3).items()]
+
+
+def history(h, today, today_utc) -> dict[str, list[dict]]:
+    hs, cell = hs_series(HIRES, h.lat, h.lon, HISTORY_START, str(today.date()))
     clat, clon, km = cell or (None, None, None)
     out = dict(cells=[dict(code=h.code, cell_lat=clat, cell_lon=clon, cell_km=km, history_end=str(today.date()))],
                viability_weekly=[], viable_days=[], forecast=[])
@@ -95,13 +113,6 @@ def harbour(h, live: bool) -> dict[str, list[dict]]:
                                         for w, v in weekly_viability(worst, lim).items()]
             per_year, shoulder = viable_days(worst, lim)
             out["viable_days"].append(dict(code=h.code, limit_m=lim, per_year=per_year, shoulder=shoulder))
-        if live:
-            out["forecast"] = [dict(code=h.code, date=str(d), worst_hs_m=round(float(w), 2))
-                               for d, w in daily_worst(hs[hs.index >= today_utc], h.tz).head(3).items()]
-    if not live:
-        CACHE.mkdir(parents=True, exist_ok=True)
-        path.with_suffix(".tmp").write_text(json.dumps(out))
-        path.with_suffix(".tmp").replace(path)  # whole file or nothing, if the run is killed
     return out
 
 

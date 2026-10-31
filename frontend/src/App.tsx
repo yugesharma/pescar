@@ -8,15 +8,17 @@ import { rulesFor } from './legal.ts'
 type Trip = { date: string; worst_hs_m: number; status: 'GO' | 'MARGINAL' | 'NO-GO' }
 type Summary = {
   code: string; name: string; cc: string; region: string; region_name: string; lat: number; lon: number; pilot: number
-  score: number; limiting: string; viable_days: number
+  score: number; limiting: string; viable_days: number; small_boats: number; nights_per_resident: number | null
 }
 type Harbour = Summary & {
   cell_km: number; shoulder_days: number; coords: string; rank: number; of: number
-  small_boats: number; places: number; transport_km: number; transport: string
-  community: number; boats_part: number; tourism_part: number; viability: number; income: number
+  places: number; transport_km: number; transport: string
+  community: number; viability: number; income: number
+  tourism_fit: number; enough_visitors: number; reachable: number; not_crowded: number | null
+  band: string | null
   fishing_hours: number | null; headroom: number | null; stock_penalty: number | null
   attractiveness: number | null; habitat_share: number | null
-  weekly: { week: number; viability: number; trip_cap: number | null }[]; trips: Trip[]
+  weekly: { week: number; viability: number; trip_cap: number | null }[]; trips: Trip[]; cap_boats: number
   state: 'Candidate' | 'Proposed' | 'Validated' | 'Active'; proposals: Proposal[]; validation: { date: string; boats: number } | null
   species: { name: string; scientific: string; status: 'Overfished' | 'Unknown' | 'Healthy'; source: string; year: number | null; target: number; share: number | null }[]
 }
@@ -30,6 +32,16 @@ type Watched = {
   weekly: { start: string; trips: number; cap: number | null }[]
 }
 type Data = { limit_m: number; meta: Record<string, string>; harbours: Summary[] }
+type TRow = {
+  code: string; name: string; region: string; region_name: string; muni_name: string; nuts3: string; level: string
+  residents: number; rental_nights: number; hotel_nights: number; nights: number; nights_per_resident: number
+  peak_month: number; peak_nights_per_resident: number; region_nights_per_resident: number
+  group_name: string | null; group_nights: number | null; group_share: number | null; reviews: number | null
+  nights_per_review: number | null; hidden_cells: number | null; places: number; transport: string; transport_km: number
+  airport: string; airport_km: number; airport_pax: number; band: string; tourism_fit: number
+  enough_visitors: number; reachable: number; not_crowded: number
+}
+type Tourism = { params: { crowd_half: number; visitor_floor: number; reach_km: number; transport_half_km: number; sweet_nights: number }; harbours: TRow[] }
 
 const LIMITS = [1.0, 1.5, 2.0]
 const FAR_KM = 9  // ~one 0.083° grid cell; closer than this is normal for a coastal harbour
@@ -42,6 +54,18 @@ const VIEWS: Record<'azores' | 'europe', { center: [number, number]; zoom: numbe
 }
 const PHONE = matchMedia('(max-width: 768px)').matches  // layers card starts collapsed on phones
 const TOP = 100  // Europe list length; the map shows every harbour
+// Explore list sort: key (bigger first; null last), right-hand value. Tourism pressure: least visited first.
+const SORTS: Record<string, { label: string; key: (s: Summary) => number | null; show: (s: Summary) => string }> = {
+  rank: { label: 'Rank', key: s => s.score, show: s => fmt(s.score) },
+  boats: { label: 'Boats registered', key: s => s.small_boats, show: s => `${s.small_boats} boats` },
+  tourism: { label: 'Tourism pressure (least first)', key: s => s.nights_per_resident === null ? null : -s.nights_per_resident,
+    show: s => s.nights_per_resident === null ? '–' : `${Math.round(s.nights_per_resident)} n/res` },
+  days: { label: 'Viable days', key: s => s.viable_days, show: s => `${Math.round(s.viable_days)} d` },
+}
+const bySort = (k: string) => (a: Summary, b: Summary) => {
+  const x = SORTS[k].key(a), y = SORTS[k].key(b)
+  return x === y ? 0 : x === null ? 1 : y === null ? -1 : y - x
+}
 // Range tool: centre, cursor or pinned target. Kept in a ref because map handlers are registered once.
 type Range = { on: boolean; center?: LngLat; target?: LngLat; pinned: boolean }
 type Label = { x: number; y: number; text: string }
@@ -141,7 +165,7 @@ export default function App() {
   const [code, setCode] = useState<string>()
   const [loaded, setH] = useState<Harbour>()
   const [rev, setRev] = useState(0)
-  const [view, setView] = useState<'explore' | 'monitor'>('explore')  // bumped after a save, to refetch the harbour
+  const [view, setView] = useState<'explore' | 'tourism' | 'monitor'>('explore')  // bumped after a save, to refetch the harbour
   const h = loaded?.code === code ? loaded : undefined  // never show the previous harbour
   const [scope, setScope] = useState<Scope>(PILOT)
   const [pressure, setPressure] = useState(false)
@@ -158,6 +182,7 @@ export default function App() {
   const [ramps, setRamps] = useState<Record<string, Ramp>>({})
   const asked = useRef(new Set<string>())  // legends already requested
   const [ranging, setRanging] = useState(false)
+  const [sort, setSort] = useState('rank')
   const [label, setLabel] = useState<Label>()
   const rng = useRef<Range>({ on: false, pinned: false })
   const mapEl = useRef<HTMLDivElement>(null)
@@ -170,6 +195,9 @@ export default function App() {
   useEffect(() => {
     fetch(`/api/harbours?limit=${limit}`).then(r => r.json()).then(setData)
   }, [limit])
+
+  const [tourism, setTourism] = useState<Tourism>()
+  useEffect(() => { fetch('/api/tourism').then(r => r.json()).then(setTourism) }, [])
 
   useEffect(() => {
     if (code) fetch(`/api/harbours/${code}?limit=${limit}`).then(r => r.json()).then(setH)
@@ -242,11 +270,11 @@ export default function App() {
         id: 'harbours', type: 'circle', source: 'harbours', filter: ['!', ['has', 'point_count']],
         paint: { 'circle-radius': 6, 'circle-color': color('score'), 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' },
       })
-      // Pilot harbours (full score): never clustered, larger, dark ring, drawn on top.
+      // Pilot harbours (full score): never clustered, larger, drawn on top. Dark ring = selected harbour.
       m.addSource('pilot', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
       m.addLayer({
         id: 'pilot', type: 'circle', source: 'pilot',
-        paint: { 'circle-radius': 9, 'circle-color': color('score'), 'circle-stroke-width': 2, 'circle-stroke-color': '#1f1f1e' },
+        paint: { 'circle-radius': 9, 'circle-color': color('score'), 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' },
       })
       // Range tool: drawn on top of everything.
       m.addSource('range', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
@@ -289,6 +317,11 @@ export default function App() {
   }, [])
 
   useEffect(() => { if (map.current) showHarbours(map.current, inViewRef.current) }, [data, scope])
+  useEffect(() => {  // dark ring on the selected harbour
+    const m = map.current
+    const ring = ['case', ['==', ['get', 'code'], code ?? ''], INK, '#fff'] as maplibregl.ExpressionSpecification
+    for (const l of ['harbours', 'pilot']) if (m?.getLayer(l)) m.setPaintProperty(l, 'circle-stroke-color', ring)
+  }, [code, data])
   useEffect(() => {  // range tool on/off; R toggles, Esc leaves
     const m = map.current
     rng.current = { on: ranging, pinned: false }
@@ -362,7 +395,8 @@ export default function App() {
   }, [ocean, times])
 
   const europe = scope.cc === 'europe'
-  const shown = europe ? inView.slice(0, TOP) : inView
+  const sorted = inView.toSorted(bySort(sort))
+  const shown = europe ? sorted.slice(0, TOP) : sorted
   const rankOf = new Map(all.map((x, i) => [x.code, i + 1]))
   const sel = all.find(x => x.code === code)  // the panel heading: harbour, else the country
 
@@ -395,7 +429,7 @@ export default function App() {
             {investOpen && h && <RulesPanel h={h} />}
           </div>
           <div className="overlay bottom-left card legend-stack">
-            <LegendItem title="Harbour score" source="Dark ring: pilot harbour (full score). Others: partial score.">
+            <LegendItem title="Harbour score" source="Large dots: pilot harbour (full score). Others: partial score. Dark ring: selected.">
               <RampLegend r={SCORE_RAMP} />
             </LegendItem>
             {pressure && <LegendItem title="Fishing vessel density" unit="hours per km² per month" source={`EMODnet, AIS, ${PRESSURE_YEAR} average`}>
@@ -421,16 +455,18 @@ export default function App() {
             </LegendItem>)}
           </div>
         </div>
-        {h && <InvestDrawer key={h.code} h={h} limit={limit} onSaved={() => setRev(r => r + 1)} open={investOpen} onToggle={setInvestOpen} />}
+        {h && <InvestDrawer key={h.code} h={h} t={tourism} limit={limit} onSaved={() => setRev(r => r + 1)} open={investOpen} onToggle={setInvestOpen} />}
       </div>
-      <aside className="panel">
+      <aside className={view === 'tourism' ? 'panel wide' : 'panel'}>
         {sel ? <><h1>{sel.name}</h1><p className="muted subtitle">{sel.code} · {sel.region_name}, {countryName.of(sel.cc)}</p></>
           : <><h1>{europe ? 'All Europe' : countryName.of(scope.cc)}</h1>
             {scope.region && <p className="muted subtitle">{regionNames.get(scope.region)}</p>}</>}
-        <div className="tabs" role="tablist">{(['explore', 'monitor'] as const).map(v =>
+        <div className="tabs" role="tablist">{(['explore', 'tourism', 'monitor'] as const).map(v =>
           <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)}>{v[0].toUpperCase() + v.slice(1)}</button>)}
         </div>
-        {view === 'monitor' ? <Monitor limit={limit} code={code} onPick={c => { const s = all.find(x => x.code === c); if (s) select(s) }} /> : <>
+        {view === 'tourism' ? (tourism ? <TourismTab t={tourism} code={code} source={data?.meta.tourism}
+          onPick={c => { const s = all.find(x => x.code === c); if (s) select(s) }} /> : <p className="muted">Loading…</p>)
+        : view === 'monitor' ? <Monitor limit={limit} code={code} onPick={c => { const s = all.find(x => x.code === c); if (s) select(s) }} onBack={() => setCode(undefined)} /> : <>
         <div className="controls">
         <label className="muted scope">Country{' '}
           <select value={scope.cc} onChange={e => changeScope({ cc: e.target.value, region: '' })}>
@@ -449,6 +485,11 @@ export default function App() {
             {LIMITS.map(l => <option key={l} value={l}>{l.toFixed(1)} m</option>)}
           </select>
         </label>
+        <label className="muted scope">Sort by{' '}
+          <select value={sort} onChange={e => setSort(e.target.value)}>
+            {Object.entries(SORTS).map(([k, o]) => <option key={k} value={k}>{o.label}</option>)}
+          </select>
+        </label>
         </div>
 
         {code ? (h ? <Detail h={h} limit={limit} onBack={() => setCode(undefined)} /> : <p className="muted">Loading…</p>) : <>
@@ -458,16 +499,12 @@ export default function App() {
               <span className="rank muted">{i + 1}</span>
               <span className="grow">{x.name}{(europe || !scope.region) && <span className="muted"> · {europe ? x.cc : x.region_name}</span>}<br />
                 <span className="muted">{x.limiting}{!europe && ` · #${rankOf.get(x.code)} in Europe`}</span></span>
-              <span>{fmt(x.score)}</span>
+              <span>{SORTS[sort].show(x)}</span>
             </button></li>))}
           </ol>
         </>}
         </>}
 
-        {data && <p className="muted">
-          Sources: Copernicus Marine, EU Fleet Register, OpenStreetMap, Global Fishing Watch, EMODnet, ICES, ICCAT, GFCM, GBIF, FishBase.
-          Built {data.meta.built_at}.
-        </p>}
       </aside>
     </div>
   )
@@ -517,15 +554,16 @@ function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () =>
   return <>
     <button className="btn" onClick={onBack}>← All harbours</button>
     {h.cell_km > FAR_KM && <p className="warning">⚠ Wave model cell {h.cell_km} km away</p>}
-    {h.coords === 'GeoNames' && <p className="warning">⚠ Location from GeoNames name match</p>}
     <div className="stats">
       <div><b>{fmt(h.score)}</b><span className="muted">{h.pilot ? 'harbour score' : 'partial score'} · #{h.rank} of {h.of}</span></div>
       <div><b>€{h.income.toLocaleString('en-GB')}</b><span className="muted">income potential per boat / year</span></div>
     </div>
     <p><strong>{h.limiting[0].toUpperCase() + h.limiting.slice(1)}</strong></p>
     <h2>Factors</h2>
-    <Factor name="Community" value={h.community}
-      note={`${h.small_boats} small boats · ${h.places} places to stay within 10 km · ${h.transport || 'airport/ferry'} ${h.transport_km} km`} />
+    <Factor name="Community" value={h.community} note={`${h.small_boats} small boats`} />
+    <Factor name="Tourism fit" value={h.tourism_fit}
+      note={`${h.places} places to stay within 10 km · ${h.transport || 'airport/ferry'} ${h.transport_km} km` +
+        (h.nights_per_resident === null ? '' : ` · ${Math.round(h.nights_per_resident)} guest nights per resident / year (${h.band})`)} />
     <Factor name="Viability" value={h.viability} note="viable days per year at 1.5 m, vs the best harbour in Europe" />
     <Factor name="Attractiveness" value={h.attractiveness ?? undefined} note={h.habitat_share === null
       ? 'pilot harbours only'
@@ -533,7 +571,7 @@ function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () =>
     <Factor name="Headroom" value={h.headroom ?? undefined} note={h.fishing_hours === null
       ? 'pilot harbours only'
       : `${Math.round(h.fishing_hours)} AIS fishing hours / year within 6 nm · stock penalty ${fmt(h.stock_penalty!)}`} />
-    {h.headroom !== null && <p className="muted">Trip cap per licensed boat: {capRange(h)} trips / week at {limit.toFixed(1)} m</p>}
+    {h.headroom !== null && <p className="muted">Trip cap: {capRange(h)} trips / week at {limit.toFixed(1)} m (sized for {h.cap_boats} boat{h.cap_boats === 1 ? '' : 's'})</p>}
     <h2>Waves at {limit.toFixed(1)} m</h2>
     <div className="stats">
       <div><b>{Math.round(h.viable_days)}</b><span className="muted">viable days / year</span></div>
@@ -546,8 +584,7 @@ function Detail({ h, limit, onBack }: { h: Harbour; limit: number; onBack: () =>
     <table><tbody>{h.trips.map(t => (
       <tr key={t.date}>
         <td>{new Date(t.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })}</td>
-        <td>worst Hs {t.worst_hs_m.toFixed(1)} m</td>
-        <td><span className={`status ${t.status}`}>{t.status}</span></td>
+        <td>worst Hs <b className={t.worst_hs_m < 1.5 ? 'hs-calm' : t.worst_hs_m <= 2 ? 'hs-rough' : 'hs-high'}>{t.worst_hs_m.toFixed(1)} m</b></td>
       </tr>))}
     </tbody></table>
   </>
@@ -579,8 +616,8 @@ const runs = (ws: number[]) => ws.reduce<number[][]>((a, w) => {
   if (last && w === last[1] + 1) last[1] = w; else a.push([w, w])
   return a
 }, []).map(([a, b]) => a === b ? `${a}` : `${a}–${b}`).join(', ')
-async function post(url: string, body: object) {
-  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+async function post(url: string, body?: object, method = 'POST') {
+  const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) })
   if (r.ok) return
   const d = (await r.json()).detail
   throw new Error(typeof d === 'string' ? d : d.map((e: { loc: string[]; msg: string }) => `${e.loc.at(-1)}: ${e.msg}`).join('; '))
@@ -604,15 +641,16 @@ function RulesPanel({ h }: { h: Harbour }) {
   </details>
 }
 
-function InvestDrawer({ h, limit, onSaved, open, onToggle }:
-  { h: Harbour; limit: number; onSaved: () => void; open: boolean; onToggle: (open: boolean) => void }) {
+function InvestDrawer({ h, t, limit, onSaved, open, onToggle }:
+  { h: Harbour; t?: Tourism; limit: number; onSaved: () => void; open: boolean; onToggle: (open: boolean) => void }) {
   const [form, setForm] = useState({ boats: 2, training: 4, budget: 50000, target: 6, notes: '' })
   const [error, setError] = useState<string>()
   const [picked, setPicked] = useState<number>()
   const [vDate, setVDate] = useState(today())
   const shown = h.proposals.find(p => p.id === picked) ?? h.proposals[0]
   const [vBoats, setVBoats] = useState<number>()
-  const save = (url: string, body: object) => post(url, body).then(() => { setError(undefined); onSaved() }, e => setError(e.message))
+  const [plan, setPlan] = useState(false)  // proposal + cap check start hidden
+  const save = (url: string, body?: object, method?: string) => post(url, body, method).then(() => { setError(undefined); onSaved() }, e => setError(e.message))
   const n = h.proposals.length
   return <details className="drawer" open={open} onToggle={e => onToggle(e.currentTarget.open)}>
     <summary>Invest <span className={`status ${h.state}`}>{h.state}</span>
@@ -621,11 +659,15 @@ function InvestDrawer({ h, limit, onSaved, open, onToggle }:
       <section>
         <h3>Season at {limit.toFixed(1)} m</h3>
         <SeasonCurve key={`${h.code}-${limit}`} weekly={h.weekly} />
-        {h.headroom !== null && <p className="muted">Trip cap per licensed boat: {capRange(h)} trips / week · stock penalty {fmt(h.stock_penalty!)}</p>}
+        {h.headroom !== null && <p className="muted">Trip cap: {capRange(h)} trips / week, sized for {h.cap_boats} boat{h.cap_boats === 1 ? '' : 's'} · stock penalty {fmt(h.stock_penalty!)}</p>}
         {h.species.length > 0 && <p className="muted">Species: {stockCounts(h).map(([s, k]) =>
           <span key={s}><span className={`status ${s}`}>{k} {s}</span> </span>)}</p>}
       </section>
+      <TourismSection h={h} t={t} />
+      {!plan ? <section><button className="btn primary" onClick={() => setPlan(true)}>
+        {n ? `Show ${n} proposal${n === 1 ? '' : 's'} & cap check` : 'Plan a proposal'}</button></section> : <>
       <section>
+        <button className="btn" onClick={() => setPlan(false)}>← Hide proposals</button>
         <h3>Proposal</h3>
         <form className="invest" onSubmit={e => { e.preventDefault(); save(`/api/harbours/${h.code}/proposals`, form) }}>
           {FIELDS.map(([k, name]) => <label key={k} className="muted">{name}
@@ -643,9 +685,14 @@ function InvestDrawer({ h, limit, onSaved, open, onToggle }:
             <td>{dayMonth(p.created)}<br /><span className="muted">{p.boats} boats · {p.training} training · {p.target} trips/wk</span>
               {p.notes && <><br /><span className="muted">{p.notes}</span></>}</td>
             <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{eur(p.budget)}<br /><span className="muted">{eur(p.income)} / yr</span></td>
-            <td>{p.caps[0] === null ? <span className="muted">no cap</span>
+            <td>{p.caps[0] !== null && p.boats > h.cap_boats && <><span className="status over">⚠ {p.boats} boats, limit {h.cap_boats}</span><br /></>}
+              {p.caps[0] === null ? <span className="muted">no cap</span>
               : p.over_weeks.length ? <span className="status over">⚠ {p.over_weeks.length} wk</span>
               : <span className="status Healthy">✓ cap</span>}</td>
+            <td><button className="link" aria-label="Delete proposal" title="Delete proposal" onClick={e => {
+              e.stopPropagation()
+              if (confirm(`Delete the ${dayMonth(p.created)} proposal (${p.boats} boats)?`)) save(`/api/harbours/${h.code}/proposals/${p.id}`, undefined, 'DELETE')
+            }}>✕</button></td>
           </tr>))}
         </tbody></table>}
       </section>
@@ -655,7 +702,8 @@ function InvestDrawer({ h, limit, onSaved, open, onToggle }:
           {shown.caps[0] === null ? <p className="muted">Trip cap: pilot harbours only</p> : <>
             <p className={shown.over_weeks.length ? 'warning' : 'muted'}>{shown.over_weeks.length
               ? `⚠ ${shown.target} trips / week is over the cap in ${shown.over_weeks.length} weeks: ${runs(shown.over_weeks)}`
-              : `${shown.target} trips / week is within the cap every week`} ({shown.boats} boats, {limit.toFixed(1)} m)</p>
+              : `${shown.target} trips / week is within the cap every week`} ({limit.toFixed(1)} m)</p>
+            {shown.boats > h.cap_boats && <p className="warning">⚠ {shown.boats} boats is over this harbour's limit of {h.cap_boats}</p>}
             <WeekBars key={shown.id} label="target trips" weekly={h.weekly.map((w, i) => ({ start: weekStart(w.week), trips: shown.target, cap: shown.caps[i] }))} />
           </>}
           {h.validation ? <p>Validated {dayMonth(h.validation.date)} {h.validation.date.slice(0, 4)} · {h.validation.boats} licensed boats</p>
@@ -668,6 +716,7 @@ function InvestDrawer({ h, limit, onSaved, open, onToggle }:
             </form>}
         </>}
       </section>
+      </>}
     </div>
   </details>
 }
@@ -676,7 +725,7 @@ const INK = '#1f1f1e'
 const TRIPS = BLUE, OVER_BAR = '#eb6834', ADDED = '#eb6834'  // palette slots 1 and 2
 
 // One harbour at a time: the selected one if it is watched, else a pick list of watched harbours.
-function Monitor({ limit, code, onPick }: { limit: number; code?: string; onPick: (code: string) => void }) {
+function Monitor({ limit, code, onPick, onBack }: { limit: number; code?: string; onPick: (code: string) => void; onBack: () => void }) {
   const [list, setList] = useState<Watched[]>()
   const [rev, setRev] = useState(0)
   useEffect(() => { fetch(`/api/monitor?limit=${limit}`).then(r => r.json()).then(d => setList(d.harbours)) }, [limit, rev])
@@ -691,6 +740,7 @@ function Monitor({ limit, code, onPick }: { limit: number; code?: string; onPick
     </button></li>)}</ol>
   </>
   return <section className="watched">
+    <button className="btn" onClick={onBack}>← All validated harbours</button>
     <p><span className={`status ${w.state}`}>{w.state}</span>{w.demo && <span className="demo">demo data</span>}</p>
     <p className="muted">Validated {dayMonth(w.validated)} {w.validated.slice(0, 4)} · {w.boats} licensed boats</p>
     <div className="stats">
@@ -821,4 +871,113 @@ function drawRange(m: maplibregl.Map, r: Range, setLabel: (l?: Label) => void) {
   if (!rb) return setLabel(undefined)
   const p = m.project(r.target!)
   setLabel({ x: p.x, y: p.y, text: `${(rb.m / NM).toFixed(1)} nm · ${fmtBearing(rb.bearing)}` })
+}
+
+// Tourism (ADR-0011): pilot harbours only; municipal guest nights, places to stay, access.
+const compact = (v: number) => Intl.NumberFormat('en-GB', { notation: 'compact', maximumFractionDigits: 1 }).format(v)
+const MONTH_NAMES = 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split(' ')
+const REGION_COLOR: Record<string, string> = { PT20: BLUE, EL42: '#eb6834' }  // palette slots 1-2, validated
+const airportName = (a: string) => a.replace(/\s*".*"/, '')
+
+// Crowding (log, across) against access (square root, up: most harbours sit within a few km); sweet spot shaded: Balanced or below and full Reachable credit.
+function TourismChart({ rows, p, highlight, onPick, w = 420, hgt = 240 }:
+  { rows: TRow[]; p: Tourism['params']; highlight?: string; onPick?: (code: string) => void; w?: number; hgt?: number }) {
+  const [hover, setHover] = useState<TRow>()
+  const L = 34, R = 8, T = 8, B = 30
+  const lo = Math.log(2), hi = Math.log(500)
+  const xs = (v: number) => L + (Math.log(Math.max(v, 2)) - lo) / (hi - lo) * (w - L - R)
+  const top = Math.max(10, Math.ceil(Math.max(...rows.map(r => r.transport_km)) / 5) * 5)
+  const ys = (v: number) => T + (1 - Math.sqrt(v / top)) * (hgt - T - B)
+  const yt = [0, 1, 5, 10, 20, 30].filter(v => v <= top)
+  const regions = [...new Set(rows.map(r => r.region))]
+  const hw = hover ?? rows.find(r => r.code === highlight)
+  return <>
+    <svg viewBox={`0 0 ${w} ${hgt}`} width="100%" role="img" aria-label="Guest nights per resident against km to airport or ferry"
+      onMouseLeave={() => setHover(undefined)} onMouseMove={e => {
+        const b = e.currentTarget.getBoundingClientRect(), k = w / b.width
+        const px = (e.clientX - b.left) * k, py = (e.clientY - b.top) * k
+        const near = rows.reduce<[number, TRow?]>((a, r) => {
+          const d = Math.hypot(xs(r.nights_per_resident) - px, ys(r.transport_km) - py)
+          return d < a[0] ? [d, r] : a }, [14])[1]
+        setHover(near) }}
+      onClick={() => hover && onPick?.(hover.code)} style={{ cursor: onPick && hover ? 'pointer' : undefined }}>
+      <rect x={L} y={ys(p.reach_km)} width={xs(p.sweet_nights) - L} height={ys(0) - ys(p.reach_km)} fill="#f0efec" />
+      <text x={L + 4} y={ys(p.reach_km) - 4} fontSize="10" fill="#6b6a66">sweet spot</text>
+      {yt.map(v => <g key={v}>
+        <line x1={L} x2={w - R} y1={ys(v)} y2={ys(v)} stroke="#e4e3df" />
+        <text x={L - 4} y={ys(v) + 4} fontSize="10" textAnchor="end" fill="#6b6a66">{v}</text>
+      </g>)}
+      {[3, 10, 30, 100, 300].map(v => <text key={v} x={xs(v)} y={hgt - 16} fontSize="10" textAnchor="middle" fill="#6b6a66">{v}</text>)}
+      <text x={w - R} y={hgt - 3} fontSize="10" textAnchor="end" fill="#6b6a66">guest nights per resident / year →</text>
+      <text x={2} y={T + 2} fontSize="10" fill="#6b6a66" transform={`rotate(-90 2 ${T + 2})`} textAnchor="end" dy="8">km to airport or ferry</text>
+      {rows.map(r => <circle key={r.code} cx={xs(r.nights_per_resident)} cy={ys(r.transport_km)} r={r.code === highlight ? 7 : 5}
+        fill={REGION_COLOR[r.region] ?? INK} stroke={r.code === highlight ? INK : '#fff'} strokeWidth="2"
+        opacity={hw === undefined || hw.code === r.code || (!hover && highlight) ? 1 : 0.55} />)}
+      {highlight && hw && hw.code === highlight && !hover && <text x={xs(hw.nights_per_resident)} y={ys(hw.transport_km) - 10}
+        fontSize="11" fontWeight="600" textAnchor="middle" fill={INK}>{hw.name}</text>}
+    </svg>
+    <p className="muted">{regions.length > 1 && regions.map(g => <span key={g}><span className="swatch" style={{ background: REGION_COLOR[g] }} />{' '}
+      {rows.find(r => r.region === g)!.region_name}{' '}</span>)}
+      <span className="swatch" style={{ background: '#f0efec', border: '1px solid #c9c8c3' }} /> sweet spot: under {p.sweet_nights} nights per resident, within {p.reach_km} km</p>
+    <p className="muted">{hw ? `${hw.name}: ${hw.nights_per_resident.toFixed(1)} nights per resident · ${hw.transport_km} km · ${hw.band} · Tourism fit ${fmt(hw.tourism_fit)}`
+      : 'Hover a dot for its values.'}</p>
+  </>
+}
+
+function TourismTab({ t, code, source, onPick }: { t: Tourism; code?: string; source?: string; onPick: (code: string) => void }) {
+  const regions = [...new Set(t.harbours.map(r => r.region))]
+  return <section className="tourism">
+    <p className="muted">Pilot harbours · {t.harbours.length}</p>
+    <TourismChart rows={t.harbours} p={t.params} highlight={code} onPick={onPick} w={560} hgt={280} />
+    <table className="tourism-table">
+      <thead><tr><th>Harbour</th><th>Residents</th><th>Guest nights</th><th>Per resident</th><th>Peak</th>
+        <th>Places ≤10 km</th><th>Gateway</th><th>Band</th><th>Fit</th></tr></thead>
+      {regions.map(g => <tbody key={g}>
+        <tr className="group"><td colSpan={9}><span className="swatch" style={{ background: REGION_COLOR[g] }} /> {t.harbours.find(r => r.region === g)!.region_name}</td></tr>
+        {t.harbours.filter(r => r.region === g).map(r => <tr key={r.code} className={r.code === code ? 'picked' : ''} tabIndex={0}
+          onClick={() => onPick(r.code)} onKeyDown={e => e.key === 'Enter' && onPick(r.code)}>
+          <td>{r.name}<br /><span className="muted">{r.muni_name} · {r.level.includes('INE') ? 'INE' : 'estimate'}
+            {r.hidden_cells ? ' · ⚠ hidden cells' : ''}</span></td>
+          <td>{compact(r.residents)}</td><td>{compact(r.nights)}</td><td><b>{r.nights_per_resident.toFixed(1)}</b></td>
+          <td>{MONTH_NAMES[r.peak_month - 1]}</td><td>{r.places}</td>
+          <td>{airportName(r.airport)} {r.airport_km} km<br /><span className="muted">{compact(r.airport_pax)} passengers</span></td>
+          <td>{r.band}</td><td>{fmt(r.tourism_fit)}</td>
+        </tr>)}
+      </tbody>)}
+    </table>
+    {source && <p className="muted">Sources: {source}, OpenStreetMap.</p>}
+  </section>
+}
+
+// Invest drawer: the selected harbour's tourism numbers, its calculation chain and how it compares.
+function TourismSection({ h, t }: { h: Harbour; t?: Tourism }) {
+  const r = t?.harbours.find(x => x.code === h.code)
+  if (!t || !r) return <section>
+    <h3>Tourism</h3>
+    <p className="muted">{h.places} places to stay within 10 km · {h.transport || 'airport/ferry'} {h.transport_km} km</p>
+    <p className="muted">Guest nights per resident: pilot harbours only</p>
+  </section>
+  const p = t.params, peers = t.harbours.filter(x => x.region === r.region)
+  const rank = peers.findIndex(x => x.code === r.code) + 1  // sorted least visited first
+  const gr = r.group_name !== null
+  return <section>
+    <h3>Tourism <span className="muted">· {r.band}</span></h3>
+    <table className="calc"><tbody>
+      {gr ? <>
+        <tr><td>Hotels & rooms</td><td>{r.group_name} {compact(r.group_nights!)} × {pct(r.group_share!)} = {compact(r.hotel_nights)}</td></tr>
+        <tr><td>Rentals</td><td>{r.reviews!.toLocaleString('en-GB')} reviews × {Math.round(r.nights_per_review!)} = {compact(r.rental_nights)}</td></tr>
+      </> : <tr><td>Hotels + rentals</td><td>{compact(r.hotel_nights)} + {compact(r.rental_nights)}</td></tr>}
+      <tr><td>Per resident</td><td>{compact(r.nights)} ÷ {r.residents.toLocaleString('en-GB')} = <b>{r.nights_per_resident.toFixed(1)}</b></td></tr>
+      <tr><td>Not crowded</td><td>1 / (1 + {r.nights_per_resident.toFixed(1)} / {p.crowd_half}) = {fmt(r.not_crowded)}</td></tr>
+      <tr><td>Enough visitors</td><td>min(1, {r.places} / {p.visitor_floor}) = {fmt(r.enough_visitors)}</td></tr>
+      <tr><td>Reachable</td><td>{r.transport || 'airport/ferry'} {r.transport_km} km = {fmt(r.reachable)}</td></tr>
+      <tr><td>Tourism fit</td><td>{fmt(r.enough_visitors)} × {fmt(r.reachable)} × {fmt(r.not_crowded)} = <b>{fmt(r.tourism_fit)}</b></td></tr>
+      <tr><td>Peak month</td><td>{MONTH_NAMES[r.peak_month - 1]}: {r.peak_nights_per_resident.toFixed(1)} per resident{gr ? ' (regional profile)' : ''}</td></tr>
+      <tr><td>Airport</td><td>{airportName(r.airport)} {r.airport_km} km · {compact(r.airport_pax)} passengers</td></tr>
+      <tr><td>Region {r.nuts3}</td><td>{Math.round(r.region_nights_per_resident)} per resident</td></tr>
+      <tr><td>Rank</td><td>{rank} of {peers.length} in {r.region_name}, least visited first</td></tr>
+    </tbody></table>
+    <TourismChart rows={peers} p={p} highlight={r.code} w={300} hgt={190} />
+    <p className="muted">{r.level}{r.hidden_cells ? ` · ⚠ ${r.hidden_cells} hidden INE cells filled` : ''}</p>
+  </section>
 }

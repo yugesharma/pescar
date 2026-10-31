@@ -35,7 +35,7 @@ select:hover, .invest input:hover, .invest textarea:hover { border-color: var(--
 .overlay { position: absolute; z-index: 2; }
 .top-left { top: 10px; left: 10px; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
 .top-right { top: 10px; right: 10px; width: 360px; max-height: calc(100% - 20px); overflow-y: auto; }
-.bottom-left { bottom: 10px; left: 10px; width: 280px; max-height: calc(100% - 300px); overflow-y: auto; }
+.bottom-left { bottom: 10px; left: 10px; width: 280px; max-height: calc(100% - 360px); overflow-y: auto; }  /* 360 = range button + open layers card */
 .card { background: var(--raised); border-radius: 8px; box-shadow: 0 1px 4px rgb(0 0 0 / .18); padding: 8px 12px; font-size: 13px; }
 .card summary { font-weight: 600; cursor: pointer; }
 .card[open] summary { margin-bottom: 4px; }
@@ -60,7 +60,7 @@ select:hover, .invest input:hover, .invest textarea:hover { border-color: var(--
 .drawer > summary::after { content: '▴'; margin-left: auto; color: var(--muted); }
 .drawer[open] > summary::after { content: '▾'; }
 .drawer > summary:hover { background: var(--hover); }
-.drawer-body { display: grid; grid-template-columns: 1fr 1.15fr 1.15fr; gap: 28px; padding: 4px 16px 16px; max-height: 48vh; overflow-y: auto; }
+.drawer-body { display: grid; grid-template-columns: 0.9fr 1.5fr 1fr 1fr; gap: 28px; padding: 4px 16px 16px; max-height: 34vh; overflow-y: auto; }
 .drawer-body h3 { font-size: 14px; margin: 4px 0 8px; }
 .drawer-body .factor { margin: 6px 0; }
 .drawer-body .status + .status, .drawer-body .muted .status { margin-right: 4px; }
@@ -110,6 +110,8 @@ tr:last-child td { border-bottom: 0; }
 .status { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; color: #fff; white-space: nowrap; }
 .GO { background: #0ca30c; color: #0b0b0b; }
 .MARGINAL { background: #fab219; color: #0b0b0b; }
+/* Next 3 days wave height, fixed cut-offs (user): <1.5 m green, 1.5-2 m yellow, >2 m red. Darker shades for text on white. */
+.hs-calm { color: #0a7d0a; } .hs-rough { color: #946500; } .hs-high { color: #d03b3b; }
 .NO-GO, .Overfished { background: #d03b3b; }
 .Healthy { background: #0ca30c; color: #0b0b0b; }
 .Unknown { background: #9a9993; }
@@ -139,7 +141,7 @@ details summary { cursor: pointer; margin: 8px 0; font-size: 14px; font-weight: 
   .top-right { width: auto; max-width: 55%; }
   .bottom-left { width: auto; max-width: 60%; max-height: 35%; }
   .drawer-body { grid-template-columns: 1fr; max-height: none; }
-  .panel { width: auto; border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
+  .panel, .panel.wide { width: auto; border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
 }
 .mpa-popup .maplibregl-popup-content { max-height: 300px; overflow-y: auto; font-size: 12px; line-height: 1.4; }
 .mpa-site + .mpa-site { border-top: 1px solid #e4e3df; margin-top: 8px; padding-top: 8px; }
@@ -153,3 +155,16 @@ details summary { cursor: pointer; margin: 8px 0; font-size: 14px; font-weight: 
 .rules .sources { list-style: none; padding-left: 0; }
 .rules a { color: inherit; }
 @media (max-width: 768px) { .stack { width: auto; max-width: 70%; } }
+
+/* Tourism tab: wider panel for the table */
+.panel.wide { width: 720px; }
+.tourism svg { max-width: 560px; }
+.tourism-table { font-size: 13px; }
+.tourism-table th { text-align: left; font-weight: 600; color: var(--muted); padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: bottom; }
+.tourism-table td { padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: top; font-variant-numeric: tabular-nums; }
+.tourism-table tbody tr:not(.group) { cursor: pointer; }
+.tourism-table tbody tr:not(.group):hover, .tourism-table tr.picked { background: var(--hover); }
+.tourism-table tr.group td { font-weight: 600; padding-top: 12px; }
+.calc { font-size: 13px; margin-bottom: 8px; }
+.calc td { padding: 2px 4px; vertical-align: top; font-variant-numeric: tabular-nums; }
+.calc td:first-child { color: var(--muted); white-space: nowrap; }

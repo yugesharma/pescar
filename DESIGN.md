@@ -156,8 +156,9 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 - **Partial score** = Community × Viability, for every other harbour, clearly labelled. Local pressure and stock penalty need data sources outside the Azores (EMODnet covers ICES waters only; the Mediterranean would need Global Fishing Watch), so they come later.
   - It is a ranking, not an absolute measure.
 - **Limiting factor** = the lowest factor, named in plain words.
-- **Weekly trip cap** = licensed boats × viable days that week × Headroom, rounded down. The Explore view shows it for one licensed boat (worst–best week); each proposal gets its own, charted against its target, with the weeks over the cap named.
-  - Licensed boats come from the proposal; for a Validated harbour, from what was recorded at validation.
+- **Weekly trip cap** = cap boats × viable days that week × Headroom, rounded down. One cap per harbour (worst–best week shown); every proposal and Monitor are checked against the same cap, with the weeks over it named.
+  - Cap boats = 1 in 5 of the harbour's registered small boats, at least 1, at most 10 (`scoring.cap_boats`, 31 Oct 2026). Before, the cap grew with each proposal's boats, so adding boats could never reach it.
+  - A proposal with more boats than cap boats is saved and flagged.
 - **Income potential** = viable days per year × €500 per boat. A proposal's projected income = income potential × its boats.
 - No "replace fishing days only" wording appears in the UI.
 
@@ -220,7 +221,9 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 - **Trip log fields:** date, harbour, boat, passengers, replaced day (yes/no).
 - **Demo data:** two harbours are seeded with generated trips, flagged as demo data in the database and the UI (`api.py --demo`): Ponta Delgada mostly replaces fishing days, Vila Franca do Campo mostly adds them and runs over the cap (user's choice).
 - **Monitor figures** (`GET /api/monitor`): trips made; share of viable days used = trips ÷ (licensed boats × typical viable days since validation, from the weekly averages; user's choice); replaced vs added days; trips per Monday–Sunday week against that week's trip cap.
-- Monitor is a second tab in the side panel (Explore / Monitor), with a trip log form per harbour.
+- Monitor is a tab in the side panel (Explore / Tourism / Monitor), with a trip log form per harbour.
+- **Tourism tab** (pilot harbours, ADR-0011): a chart of guest nights per resident (log) against km to an airport or ferry (square root), sweet spot shaded (Balanced or below, within full Reachable distance), and a table per region: residents, guest nights, nights per resident, peak month, places within 10 km, nearest airport with passengers, band, Tourism fit. The panel widens while the tab is open; clicking a row selects the harbour.
+- **Invest, Tourism section:** the selected pilot harbour's calculation chain (hotel and rental nights → per resident → Not crowded, Enough visitors, Reachable → Tourism fit), peak month, airport, its NUTS 3 region's nights per resident, its rank in the region, and the region's chart with the harbour highlighted. Data level flag (INE or estimate) and hidden INE cells shown. Non-pilot harbours show places and access only.
 
 ## Testing Decisions
 
