@@ -9,6 +9,7 @@ decisions: [docs/adr/](docs/adr/), background: [pescatourism_project.md](pescato
 Needs [uv](https://docs.astral.sh/uv/), Node 20+, a Copernicus Marine login (`uv run copernicusmarine login`), and a free
 Global Fishing Watch API token ([globalfishingwatch.org/our-apis/tokens](https://globalfishingwatch.org/our-apis/tokens),
 non-commercial use) in `.env` as `GFW_API_KEY=...` (git-ignored); `build.py` uses it for fishing pressure, and the API for the dark-vessel layer (fetched on first use, rechecked daily, cached in `data/cache/dark/`).
+The protected-areas layer (ProtectedSeas Navigator, no key) works the same way: fetched on first use, rechecked daily, cached in `data/cache/mpa/`.
 
 ```sh
 cd backend
@@ -22,7 +23,7 @@ Frontend check (from `frontend/`): `node geo.check.ts` (range and bearing maths)
 
 The chlorophyll, sea temperature and wave layers load live in the browser from the Copernicus Marine WMTS (no login, no build step), so they need network access.
 
-Self-checks (no network, from `backend/`): `uv run python scoring.py`, and `--test` on `waves.py`, `build.py`, `community.py`, `pressure.py`, `species.py`, `habitat.py`, `fronts.py`, `dark.py`, `api.py` (in-process requests against a temporary `user.db`; needs a built `pescamare.db`).
+Self-checks (no network, from `backend/`): `uv run python scoring.py`, and `--test` on `waves.py`, `build.py`, `community.py`, `pressure.py`, `species.py`, `habitat.py`, `fronts.py`, `dark.py`, `mpa.py`, `api.py` (in-process requests against a temporary `user.db`; needs a built `pescamare.db`).
 
 Demo data for Monitor (from `backend/`): `uv run python api.py --demo` seeds Ponta Delgada and Vila Franca do Campo with generated trips flagged `demo`; rerunning replaces them and leaves real validations alone.
 
@@ -46,6 +47,7 @@ Demo data for Monitor (from `backend/`): `uv run python api.py --demo` seeds Pon
   - `waves/<code>.json`: wave results per non-pilot harbour (history up to the fetch date).
   - `gfw_effort_<year>.json`: Global Fishing Watch AIS fishing effort for the pilot box.
   - `ices/`: ICES SAG stock lists and status per assessment.
-  - `aquamaps/<SpecID>.html`: AquaMaps envelope pages (species temperature ranges).
+  - `gbif/<Genus_species>.json`: each species' GBIF occurrence cells (0.5°).
+  - `temp_05deg.npz`: mean 2023–2025 Copernicus surface and seabed temperature per 0.5° cell.
   - `thetao_monthly.nc`: Copernicus monthly sea temperature by depth for the pilot box, mean per month 2023–2025.
   - `bathy/<code>.tif`: EMODnet Bathymetry around each pilot harbour.

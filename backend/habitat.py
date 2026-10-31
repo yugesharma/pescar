@@ -3,7 +3,7 @@
 Suitable = monthly sea temperature inside the species' range (surface for surface fish, at the seabed for
 bottom-living fish) and, for bottom-living fish, seabed depth inside their depth range.
 Run:  uv run python habitat.py --test  -> self-check, no network
-Cached: data/cache/thetao_monthly.nc (Copernicus Marine), data/cache/bathy/<code>.tif (EMODnet Bathymetry).
+Cached: data/cache/thetao_monthly_<region>.nc (Copernicus Marine), data/cache/bathy/<code>.tif (EMODnet Bathymetry).
 """
 import sys
 import urllib.request
@@ -21,10 +21,10 @@ BATHY = ("https://ows.emodnet-bathymetry.eu/wcs?service=WCS&version=2.0.1&reques
          "&coverageId=emodnet__mean&format=image/tiff&subset=Lat({},{})&subset=Long({},{})")
 
 
-def temperature(lat: tuple, lon: tuple):
-    """Monthly mean sea temperature (month 1-12, depth, latitude, longitude) over YEARS, for a box."""
+def temperature(region: str, lat: tuple, lon: tuple):
+    """Monthly mean sea temperature (month 1-12, depth, latitude, longitude) over YEARS, for a pilot region's box."""
     import xarray as xr
-    path = CACHE / "thetao_monthly.nc"
+    path = CACHE / f"thetao_monthly_{region}.nc"
     if not path.exists():
         import copernicusmarine as cm
         print("… Copernicus monthly sea temperature", flush=True)
@@ -86,15 +86,17 @@ def shares(g: pd.DataFrame, surface: np.ndarray, bottom: np.ndarray, sp: pd.Data
 
 
 def run(harbours: pd.DataFrame, sp: pd.DataFrame) -> pd.DataFrame:
-    """Pilot harbours x species -> code, species, month, share. Delete the cached temperature if the pilot changes."""
-    p = harbours[harbours.pilot.astype(bool)]
-    t = temperature((p.lat.min() - 0.3, p.lat.max() + 0.3), (p.lon.min() - 0.3, p.lon.max() + 0.3))
+    """Pilot harbours x their region's species -> code, species, month, share.
+    Delete a region's cached temperature if its harbours change."""
     rows = []
-    for h in p.itertuples():
-        g = seabed(h.code, h.lat, h.lon)
-        s = shares(g, *cell_temps(g, t), sp)
-        rows += [dict(code=h.code, species=name, month=m + 1, share=round(float(s[i, m]), 4))
-                 for i, name in enumerate(sp.name) for m in range(12)]
+    for region, p in harbours[harbours.pilot.astype(bool)].groupby("region"):
+        t = temperature(region, (p.lat.min() - 0.3, p.lat.max() + 0.3), (p.lon.min() - 0.3, p.lon.max() + 0.3))
+        mine = sp[sp.region == region]
+        for h in p.itertuples():
+            g = seabed(h.code, h.lat, h.lon)
+            s = shares(g, *cell_temps(g, t), mine)
+            rows += [dict(code=h.code, species=name, month=m + 1, share=round(float(s[i, m]), 4))
+                     for i, name in enumerate(mine.name) for m in range(12)]
     return pd.DataFrame(rows)
 
 

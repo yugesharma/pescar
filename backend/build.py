@@ -2,7 +2,7 @@
 
 Run:  uv run python build.py          (--test: self-check, no network)
 First run fetches waves for ~2,300 harbours (~1 h, cached per harbour in data/cache/waves/);
-later runs only refetch the 11 pilot harbours, which also get the 3-day forecast.
+later runs only refetch the pilot harbours (PILOT_REGIONS), which also get the 3-day forecast.
 """
 import re
 import sqlite3
@@ -27,7 +27,7 @@ DB = DATA / "pescamare.db"
 GEONAMES = DATA / "cache" / "geonames"         # download.geonames.org/export/dump/<CC>.zip
 NUTS = DATA / "cache" / "nuts2.geojson"
 NUTS_URL = "https://gisco-services.ec.europa.eu/distribution/v2/nuts/geojson/NUTS_RG_01M_2024_4326_LEVL_2.geojson"
-PILOT_SEGMENTS = ["4K9", "4KA"]                # Azores (ADR-0004)
+PILOT_REGIONS = ["PT20", "EL42"]              # NUTS 2: Azores (ADR-0004), South Aegean (ADR-0008)
 NAMES = {"PTLDP": "Lajes do Pico"}             # UN/LOCODE just says "Lajes"
 ISO2 = dict(BEL="BE", BGR="BG", CYP="CY", DEU="DE", DNK="DK", ESP="ES", EST="EE", FIN="FI", FRA="FR",
             GRC="GR", HRV="HR", IRL="IE", ITA="IT", LTU="LT", LVA="LV", MLT="MT", NLD="NL", POL="PL",
@@ -79,7 +79,7 @@ def geonames(cc: str) -> pd.DataFrame:
 
 def harbours() -> pd.DataFrame:
     """Harbours (ADR-0004): EU ports of registration with a licensed vessel under 12 m, outside
-    the French outermost regions. code, name, cc, small_boats, pilot, lat, lon, coords, tz."""
+    the French outermost regions. code, name, cc, small_boats, lat, lon, coords, tz."""
     f = pd.read_csv(DATA / "fleet_EU_current.csv", low_memory=False, usecols=[
         "Country of Registration", "Place of Registration Code", "Place of Registration Name",
         "LOA (m)", "Licence Indicator", "Segment"])
@@ -90,8 +90,7 @@ def harbours() -> pd.DataFrame:
     # Not every country uses UN/LOCODE (Greece '007', Italy '00126'); those codes repeat across countries.
     f["code"] = raw.where(raw.str.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}"), f.cc + "-" + raw)
     h = f.groupby("code").agg(name=("Place of Registration Name", "first"), cc=("cc", "first"),
-                              small_boats=("code", "size"),
-                              pilot=("Segment", lambda s: s.isin(PILOT_SEGMENTS).any())).reset_index()
+                              small_boats=("code", "size")).reset_index()
 
     loc = pd.read_csv(DATA / "unlocode.csv", dtype=str, keep_default_na=False)
     loc = loc[loc.Coordinates != ""].assign(code=loc.Country + loc.Location).drop_duplicates("code")
@@ -141,8 +140,11 @@ def regions(h: pd.DataFrame) -> pd.DataFrame:
 
 
 def main():
+    sp = species.run()  # first: the slowest network step on a cold cache (GBIF)
     all_h = harbours()
     h = all_h[all_h.in_europe].drop(columns="in_europe")  # no coordinates -> not in Europe either
+    h = h.merge(regions(h), on="code")
+    h["pilot"] = h.region.isin(PILOT_REGIONS)
     w = waves.run(h)
     cells = w.pop("cells")
     placed = cells[cells.cell_km <= waves.MAX_KM]
@@ -151,9 +153,8 @@ def main():
                   no_sea_cell=len(cells) - len(placed), fetch_failed=len(h) - len(cells), placed=len(placed))
     print(counts)
     h = h.merge(placed, on="code")
-    h = h.merge(community.run(h), on="code").merge(regions(h), on="code")
+    h = h.merge(community.run(h), on="code")
     h = h.merge(pressure.run(h), on="code", how="left")
-    sp = species.run()
     hab = habitat.run(h, sp)
     year = hab.groupby(["code", "species"]).share.mean().reset_index()  # mean over the 12 months
     status = dict(zip(sp.name, sp.status))
@@ -167,8 +168,9 @@ def main():
         h.merge(default.rename(columns={"per_year": "viable_days"})).to_dict("records"))
     ).drop(columns="viable_days")  # per-limit values live in the viable_days table
     w = {k: v[v.code.isin(h.code)] for k, v in w.items()}
-    p = h[h.pilot.astype(bool)]
-    layers = fronts.run((p.lat.min() - 0.7, p.lat.max() + 0.7), (p.lon.min() - 0.7, p.lon.max() + 0.7))
+    layers = {"fronts_regions": ",".join(PILOT_REGIONS)}
+    for region, p in h[h.pilot.astype(bool)].groupby("region"):
+        layers |= fronts.run(region, (p.lat.min() - 0.7, p.lat.max() + 0.7), (p.lon.min() - 0.7, p.lon.max() + 0.7))
     meta = pd.DataFrame([
         *[(f"harbours_{k}", str(v)) for k, v in counts.items()],
         ("built_at", pd.Timestamp.now(tz="UTC").isoformat(timespec="minutes")),
@@ -179,7 +181,7 @@ def main():
             pd.Timestamp((community.CACHE / f"osm_{cc}.json").stat().st_mtime, unit="s").strftime(f"{cc} %Y-%m-%d")
             for cc in sorted(h.cc.unique()))),
         ("fleet", "EU Fleet Register, current records"),
-        ("species", "ICES Stock Assessment Graphs, ICCAT, AquaMaps, FishBase"),
+        ("species", "ICES Stock Assessment Graphs, ICCAT, GFCM SoMFi 2025, GBIF x Copernicus temperature, FishBase"),
         ("habitat", f"Copernicus Marine {habitat.TEMP}, {habitat.YEARS[0][:4]}-{habitat.YEARS[1][:4]}; EMODnet Bathymetry"),
         *layers.items(),
         ("pressure", f"Global Fishing Watch apparent fishing effort (AIS), {pressure.YEAR}, "

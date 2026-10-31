@@ -141,3 +141,15 @@ details summary { cursor: pointer; margin: 8px 0; font-size: 14px; font-weight: 
   .drawer-body { grid-template-columns: 1fr; max-height: none; }
   .panel { width: auto; border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
 }
+.mpa-popup .maplibregl-popup-content { max-height: 300px; overflow-y: auto; font-size: 12px; line-height: 1.4; }
+.mpa-site + .mpa-site { border-top: 1px solid #e4e3df; margin-top: 8px; padding-top: 8px; }
+.stack { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; width: 400px; pointer-events: none; }
+.stack > * { pointer-events: auto; }
+.stack > details[open] { align-self: stretch; }
+.rules > summary { font-weight: 600; cursor: pointer; }
+.rules h3 { font-size: 13px; margin: 10px 0 4px; }
+.rules ul, .rules ol { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.45; }
+.rules li + li { margin-top: 3px; }
+.rules .sources { list-style: none; padding-left: 0; }
+.rules a { color: inherit; }
+@media (max-width: 768px) { .stack { width: auto; max-width: 70%; } }

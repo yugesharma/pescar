@@ -1,6 +1,6 @@
 # Fish fronts layer after Tijani et al. 2015, without catch data
 
-Habitat from temperature ranges (ADR-0006) barely varies within a 6 nm trip area. Map2Fish, the Copernicus Marine use case for fishing tourism, locates pelagic fish at fronts using the method of Tijani et al. (IGARSS 2015): on 3-day SST and chlorophyll composites, upwelling areas are strong fronts where the SST and chlorophyll gradients point in opposite directions, P = ∇T·∇C / (‖∇T‖‖∇C‖) near −1. We add this as a daily map layer for the pilot area: SST fronts (gradient ≥ 0.02 °C/km) and, on them, head-on stretches (P < −0.7). It is not part of the harbour score.
+Habitat from temperature ranges (ADR-0006) barely varies within a 6 nm trip area. Map2Fish, the Copernicus Marine use case for fishing tourism, locates pelagic fish at fronts using the method of Tijani et al. (IGARSS 2015): on 3-day SST and chlorophyll composites, upwelling areas are strong fronts where the SST and chlorophyll gradients point in opposite directions, P = ∇T·∇C / (‖∇T‖‖∇C‖) near −1. We add this as a daily map layer for the pilot area: SST fronts (the strongest 10% of gradients in each region; first a fixed 0.02 °C/km, which flagged most of the Aegean) and, on them, head-on stretches (P < −0.7). It is not part of the harbour score.
 
 ## Considered Options
 - Front frequency per trip area as Attractiveness: would separate harbours better, but changes scores, needs a 3-year daily download, and the 4 km chlorophyll grid is only 2–3 cells across a trip area.

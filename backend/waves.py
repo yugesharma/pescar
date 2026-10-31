@@ -6,6 +6,7 @@ Run:  uv run python waves.py --test   -> logic self-check, no network
 import json
 import math
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -108,11 +109,14 @@ def run(harbours: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """harbours: code, lat, lon, tz, pilot -> tables for the database. A harbour whose fetch
     fails is left out (no cells row) and retried on the next run."""
     def one(h):
-        try:
-            return harbour(h, live=h.pilot)
-        except Exception as e:
-            print("!", h.code, h.name, repr(e)[:200], flush=True)
-            return {}
+        for attempt in range(3):  # Copernicus login fails now and then under 16 threads
+            try:
+                return harbour(h, live=h.pilot)
+            except Exception as e:
+                if attempt == 2:
+                    print("!", h.code, h.name, repr(e)[:200], flush=True)
+                    return {}
+                time.sleep(5)
     tables = dict(cells=[], viability_weekly=[], viable_days=[], forecast=[])
     with ThreadPoolExecutor(16) as ex:  # I/O bound: ~1.6 s per harbour with 8 threads vs 7 s alone
         for i, rows in enumerate(ex.map(one, harbours.itertuples()), 1):
@@ -161,5 +165,6 @@ if __name__ == "__main__":
     if "--test" in sys.argv:
         test()
     elif "--check" in sys.argv:
-        from build import harbours
-        check(harbours().query("pilot"))
+        from build import harbours, regions
+        h = harbours().dropna(subset=["lat"])
+        check(h[h.code.isin(regions(h).query("region == 'PT20'").code)])   # the ADR-0002 check was for the Azores

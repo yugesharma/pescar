@@ -1,7 +1,7 @@
 """Pressure step: AIS fishing hours near each pilot harbour (Global Fishing Watch, ADR-0005).
 
 Run:  uv run python pressure.py --test  -> ring self-check, no network
-Needs GFW_API_KEY in .env (free non-commercial token). Cached in data/cache/gfw_effort_<year>.json.
+Needs GFW_API_KEY in .env (free non-commercial token). Cached in data/cache/gfw_effort_<year>_<region>.json.
 """
 import json
 import os
@@ -28,11 +28,11 @@ def token() -> str:
     return os.environ.get("GFW_API_KEY") or next(l.split("=", 1)[1] for l in lines if l.startswith("GFW_API_KEY="))
 
 
-def effort(lat: tuple, lon: tuple) -> pd.DataFrame:
-    """AIS fishing hours on 0.01° cells (one row per vessel and cell) in a lat/lon box: lat, lon, hours."""
-    path = CACHE / f"gfw_effort_{YEAR}.json"
+def effort(region: str, lat: tuple, lon: tuple) -> pd.DataFrame:
+    """AIS fishing hours on 0.01° cells (one row per vessel and cell) in a pilot region's box: lat, lon, hours."""
+    path = CACHE / f"gfw_effort_{YEAR}_{region}.json"
     if not path.exists():
-        print("… GFW fishing effort", YEAR, flush=True)
+        print("… GFW fishing effort", YEAR, region, flush=True)
         box = [[lon[0], lat[0]], [lon[1], lat[0]], [lon[1], lat[1]], [lon[0], lat[1]], [lon[0], lat[0]]]
         req = urllib.request.Request(URL, json.dumps({"geojson": {"type": "Polygon", "coordinates": [box]}}).encode(),
                                      headers={"Authorization": f"Bearer {token()}", "Content-Type": "application/json",
@@ -49,11 +49,13 @@ def hours(lat, lon, g: pd.DataFrame) -> float:
 
 
 def run(harbours: pd.DataFrame) -> pd.DataFrame:
-    """Pilot harbours (code, lat, lon) -> code, fishing_hours. The cached box is the pilot's, padded by 0.2°;
-    delete the cache file if the pilot changes."""
-    p = harbours[harbours.pilot.astype(bool)]
-    g = effort((p.lat.min() - 0.2, p.lat.max() + 0.2), (p.lon.min() - 0.2, p.lon.max() + 0.2))
-    return pd.DataFrame(dict(code=p.code, fishing_hours=[hours(h.lat, h.lon, g) for h in p.itertuples()]))
+    """Pilot harbours (code, lat, lon, region) -> code, fishing_hours. Each region's cached box is its harbours',
+    padded by 0.2°; delete the cache file if a region's harbours change."""
+    out = []
+    for region, p in harbours[harbours.pilot.astype(bool)].groupby("region"):
+        g = effort(region, (p.lat.min() - 0.2, p.lat.max() + 0.2), (p.lon.min() - 0.2, p.lon.max() + 0.2))
+        out.append(pd.DataFrame(dict(code=p.code, fishing_hours=[hours(h.lat, h.lon, g) for h in p.itertuples()])))
+    return pd.concat(out)
 
 
 def test():

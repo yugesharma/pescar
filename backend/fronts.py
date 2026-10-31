@@ -1,10 +1,10 @@
 """Fronts step: where fish are likely today, after Tijani et al. 2015 (the method behind Map2Fish), without catch data.
 
 Over the last 3 days of Copernicus sea temperature (SST) and chlorophyll (CHL):
-- a front is where SST changes by at least FRONT_C_PER_KM;
+- a front is where SST changes fastest: the strongest FRONT_SHARE of the region's sea cells;
 - it is head-on (upwelling: cold, plankton-rich water) where P = ∇T·∇C / (|∇T| |∇C|) < HEAD_ON,
   i.e. the two gradients point in nearly opposite directions.
-Writes data/fronts.png, a map image (EPSG:3857 rows) for the pilot area. Map layer only; not in the score.
+Writes data/fronts_<region>.png, a map image (EPSG:3857 rows) per pilot region. Map layer only; not in the score.
 Run:  uv run python fronts.py --test  -> self-check, no network
 """
 import struct
@@ -17,13 +17,13 @@ import numpy as np
 SST = ("METOFFICE-GLO-SST-L4-NRT-OBS-SST-V2", "analysed_sst")                       # 0.05°, daily, kelvin
 CHL = ("cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-multi-4km_P1D", "CHL")        # 4 km, daily, gap-free
 DAYS = 3                  # composite length, as in the paper
-FRONT_C_PER_KM = 0.02     # judgement (user, 30 Oct 2026): SST front; ~ the strongest 10% of Azores sea on 27-29 Oct 2026
+FRONT_SHARE = 0.1         # judgement (user, 31 Oct 2026): per region; 0.02 °C/km was the Azores' 10% but most of the Aegean
 HEAD_ON = -0.7            # judgement (user): angle between the gradients over ~135°
-PNG = Path(__file__).parent.parent / "data" / "fronts.png"
+PNG = str(Path(__file__).parent.parent / "data" / "fronts_{}.png")   # .format(region)
 COLOURS = {1: (214, 40, 40, 230), 2: (13, 148, 136, 240)}   # front, head-on front
 
 
-def classify(t: np.ndarray, c: np.ndarray, lat: np.ndarray, step: float) -> np.ndarray:
+def classify(t: np.ndarray, c: np.ndarray, lat: np.ndarray, step: float, threshold: float | None = None) -> np.ndarray:
     """SST (°C) and CHL on one regular grid (rows = lat ascending, step in degrees) -> 0 none, 1 front, 2 head-on front.
     CHL gradients are taken on log10 CHL, which spans orders of magnitude."""
     dy = 111.2 * step
@@ -34,7 +34,9 @@ def classify(t: np.ndarray, c: np.ndarray, lat: np.ndarray, step: float) -> np.n
     strength = np.hypot(tx, ty)
     with np.errstate(invalid="ignore", divide="ignore"):
         p = (tx * cx + ty * cy) / (strength * np.hypot(cx, cy))
-    front = strength >= FRONT_C_PER_KM
+    if threshold is None:  # °C/km; the strongest FRONT_SHARE of sea cells
+        threshold = np.nanquantile(strength, 1 - FRONT_SHARE)
+    front = strength >= threshold
     return np.where(front & (p < HEAD_ON), 2, np.where(front, 1, 0))
 
 
@@ -55,8 +57,8 @@ def png(path: Path, rgba: np.ndarray):
                      + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
 
 
-def run(lat: tuple, lon: tuple) -> dict:
-    """Fetch the last DAYS days both products have, write PNG; returns dates and image corners for the map."""
+def run(region: str, lat: tuple, lon: tuple) -> dict:
+    """Fetch the last DAYS days both products have, write the region's PNG; returns dates and image corners."""
     import copernicusmarine as cm
     box = dict(minimum_latitude=lat[0], maximum_latitude=lat[1], minimum_longitude=lon[0], maximum_longitude=lon[1],
                start_datetime=str(np.datetime64("today") - 10))
@@ -71,10 +73,10 @@ def run(lat: tuple, lon: tuple) -> dict:
     rgba = np.zeros((*k.shape, 4), np.uint8)
     for cls, colour in COLOURS.items():
         rgba[k == cls] = colour
-    png(PNG, rgba)
+    png(Path(PNG.format(region)), rgba)
     w, e, s, n = lo[0] - step / 2, lo[-1] + step / 2, la[0] - step / 2, la[-1] + step / 2
-    return dict(fronts_dates=f"{str(days[0])[:10]} to {str(days[-1])[:10]}",
-                fronts_corners=f"[[{w:.4f},{n:.4f}],[{e:.4f},{n:.4f}],[{e:.4f},{s:.4f}],[{w:.4f},{s:.4f}]]")
+    return {f"fronts_dates_{region}": f"{str(days[0])[:10]} to {str(days[-1])[:10]}",
+            f"fronts_corners_{region}": f"[[{w:.4f},{n:.4f}],[{e:.4f},{n:.4f}],[{e:.4f},{s:.4f}],[{w:.4f},{s:.4f}]]"}
 
 
 def test():
@@ -84,8 +86,10 @@ def test():
     t = np.tile(0.03 * x_km, (5, 1))
     west = np.tile(10 ** (-0.001 * x_km), (5, 1))   # CHL rises westward: head-on
     east = np.tile(10 ** (0.001 * x_km), (5, 1))    # CHL rises eastward: same direction
-    assert (classify(t, west, lat, step) == 2).all() and (classify(t, east, lat, step) == 1).all()
-    assert (classify(t / 3, west, lat, step) == 0).all()   # 0.01 °C/km: no front
+    assert (classify(t, west, lat, step, 0.02) == 2).all() and (classify(t, east, lat, step, 0.02) == 1).all()
+    assert (classify(t / 3, west, lat, step, 0.02) == 0).all()   # 0.01 °C/km: no front
+    ramp = np.cumsum(np.tile(0.01 * (1 + np.arange(10)), (10, 1)) * 11.12, 1)   # gradient grows eastward
+    assert ((classify(ramp, np.ones((10, 10)), np.arange(10) * 0.1, 0.1) > 0).mean(0) > 0).sum() <= 2  # top 10%
     # Mercator rows: north first, and the equator row sits mid-image for a box symmetric about it.
     r = mercator_rows(np.array([-1.0, 0, 1]), 1.0, 9)
     assert r[0] == 2 and r[-1] == 0 and r[4] == 1, r

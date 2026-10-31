@@ -1,6 +1,6 @@
 # PescaMare: design
 
-Pilot: **Azores** (11 pilot harbours, full score). All European harbours shown with a partial score. Built for the Copernicus Marine Service Hackathon 2026; pitch materials are due **31 Oct 2026, 08:30**.
+Pilots: **Azores** (11 harbours) and **South Aegean** (24 harbours, ADR-0008), full score. All European harbours shown with a partial score. Built for the Copernicus Marine Service Hackathon 2026; pitch materials are due **31 Oct 2026, 08:30**.
 Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); the decisions behind this design are recorded in [docs/adr/](docs/adr/). Background and sources: [pescatourism_project.md](pescatourism_project.md).
 
 ## Problem Statement
@@ -120,13 +120,14 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
   - GFW apparent fishing effort (`public-global-fishing-effort`, AIS, 0.01°), 2025, all gears; one 4Wings report for the pilot box, cached.
   - Per harbour: sum the fishing hours 2–11 km (6 nm) from the harbour; hours within 2 km are mostly mooring or manoeuvring.
   - Result (30 Oct 2026): 0 h (Angra do Heroísmo, Santa Cruz das Flores) to 492 h (Vila Franca do Campo, Headroom 0.17).
-  - EMODnet static-gear fishing hours (ICES VMS, 0.05°) were the plan but have no cell within 6 nm of 9 of the 11 pilot harbours; they are shown as a map layer (latest edition per ecoregion).
+  - EMODnet static-gear fishing hours (ICES VMS, 0.05°) were the plan but have no cell within 6 nm of 9 of the 11 pilot harbours; they are not used. The map layer is EMODnet fishing-vessel density (AIS, 2023), which also covers the Mediterranean.
   - Swept area ratio is **not** used: it has no Azores data (bottom trawling is banned there).
 - **Stock penalty** (input 2, from species status + habitat):
   - Status weights: Overfished 1.0, Unknown 0.7, Healthy 0.4.
   - Stock penalty = Σ weight × habitat share ÷ Σ habitat share over every species in the table (same habitat calculation as Attractiveness), so it stays between 0.4 and 1; a trip area with no habitat of any listed species gets 1 (ADR-0006).
   - So the penalty differs by harbour even though stock status is regional (ADR-0003).
-  - Result (30 Oct 2026): 0.57 (Horta) to 0.67 (Velas).
+  - Result (31 Oct 2026): Azores 0.57 (Santa Cruz das Flores) to 0.62 (Velas); South Aegean 0.64 to 0.66.
+- Stock status in the South Aegean: GFCM SoMFi 2025, GSA 22 (ADR-0008); Overfished if F/FMSY > 1 or B/BMSY < 0.5.
 - Headroom joins the product for the pilot harbours only, so it can only lower a pilot harbour's rank in Europe.
 
 ### Species and Attractiveness (F5)
@@ -142,15 +143,15 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 - **Target species** are the top two by demand that are not Overfished: **blue jack mackerel** and **skipjack tuna**.
 - The same habitat calculation also runs for the Overfished species, to give each harbour's stock penalty (see Headroom).
 - **Habitat** (ADR-0006): for each EMODnet Bathymetry sea cell (~115 m) within 6 nm of a pilot harbour and each month, a species' habitat is suitable when:
-  - Copernicus monthly sea temperature (`cmems_mod_glo_phy-thetao_anfc_0.083deg_P1M-m`, mean of 2023–2025 per month) is inside the species' range: the 10th–90th percentile of the temperatures of the cells AquaMaps used for its envelope; surface temperature for surface fish, temperature at the seabed for bottom-living fish;
+  - Copernicus monthly sea temperature (`cmems_mod_glo_phy-thetao_anfc_0.083deg_P1M-m`, mean of 2023–2025 per month) is inside the species' range: the 2.5th–97.5th percentile of the mean 2023–2025 Copernicus temperature over the species' GBIF occurrence cells (0.5°, ADR-0009); surface temperature for surface fish, temperature at the seabed for bottom-living fish;
   - for bottom-living fish only, seabed depth is inside the FishBase "usually" depth range.
   - Chlorophyll is not scored; it is a map layer (slice 6).
 - **Attractiveness** = the target species' habitat share of the trip area, mean over the two species and 12 months, divided by the best pilot harbour.
-  - Result (30 Oct 2026): habitat share 0.29 (Flores, Terceira's Praia, Graciosa) to 0.42 (Vila do Porto). Surface temperature hardly varies within 6 nm, so it separates harbours little.
+  - Result (31 Oct 2026, GBIF ranges, ADR-0009): Azores habitat share 0.92–0.96, so it barely separates Azores harbours (surface temperature hardly varies within 6 nm); South Aegean 0.22 (Lindos) to 0.71 (Paros), set by how much seabed lies at pandora's 20–100 m.
 - The method is adapted from Map2Fish's inputs and probability framing. We have no catch data to calibrate with, so we use species ranges instead. Map2Fish's own front method is the fish fronts map layer (see Map layers).
 
 ### Harbour score (F8) and trip cap (F6)
-- **Harbour score** = Community × Viability × Attractiveness × Headroom, for the 11 pilot harbours.
+- **Harbour score** = Community × Viability × Attractiveness × Headroom, for the pilot harbours (Azores, South Aegean).
   - Each factor is divided by the best value across all European harbours, so it is never min–max scaled to zero. Dividing by a constant never changes the order, so the pilot ranking is the same whichever set is used.
 - **Partial score** = Community × Viability, for every other harbour, clearly labelled. Local pressure and stock penalty need data sources outside the Azores (EMODnet covers ICES waters only; the Mediterranean would need Global Fishing Watch), so they come later.
   - It is a ranking, not an absolute measure.
@@ -170,17 +171,26 @@ A web app with three screens, backed by Copernicus Marine and EU fisheries data 
 - The token lives in `.env`.
 - The layer is an overlay only. It is not part of the score and is labelled "not evidence of illegal activity".
 
+### Pescatourism rules (Invest)
+- While the Invest drawer is open, a collapsible "Rules" card sits on the map's right side (under the species card) with the pescatourism law for the harbour's pilot region: Greece and the Azores, each line tagged with its source and a numbered source list (`frontend/src/legal.ts`). Other regions show that no verified summary exists.
+
+### Protected areas (story 15)
+- Data: ProtectedSeas Navigator sites in the Europe box, with Level of Fishing Protection 1–5 and banned / restricted / allowed per gear and activity (ADR-0010). Ocean-wide treaty areas, EEZs, ship-reporting and water-quality areas dropped (user's choice, 31 Oct 2026).
+- The API checks Navigator at most once a day (`backend/mpa.py`) and caches the layer in `data/cache/mpa/`.
+- On the map, three switches (user's choice): **No-fishing zones** (level 5, red fill), **Fishing rules** (levels 2–4, outlines: magenta heavily restricted, yellow some rules), **Other rules** (level 1, grey dashed outlines). Click any area for every site under the click with its rules and a link to the regulations.
+- Overlay only, not part of the score.
+
 ### Map layers
 - **Copernicus Marine WMTS tiles:** chlorophyll, sea temperature, waves. These are live, with no processing on our side.
   - Chlorophyll (gap-free 4 km, log scale 0.05–2 mg/m³), surface sea temperature (0.083° daily, 0–30 °C), wave height (0.083° 3-hourly, 0–4 m).
   - Each shows its dataset's latest time step, read in the browser from that dataset's WMTS capabilities, and states it in its label.
   - Result (30 Oct 2026): chlorophyll 29 Oct, temperature 31 Oct (forecast), waves 30 Oct 18:00 UTC.
-- **EMODnet WMS tiles:** fishing intensity, static gears (toggle).
+- **EMODnet WMS tiles:** fishing-vessel density, AIS, 2023 yearly average (toggle).
 - **One generated image each:** viability and habitat suitability. These are small grids, so no tile server is needed.
 - **Fish fronts** (ADR-0007; a map layer, not scored): the method behind Map2Fish (Tijani et al. 2015) without its catch-data calibration.
   - Last 3 days of Copernicus SST (`METOFFICE-GLO-SST-L4-NRT-OBS-SST-V2`, 0.05°) and gap-free chlorophyll (`cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-multi-4km_P1D`), on the chlorophyll grid.
-  - Front: SST gradient ≥ 0.02 °C/km. Head-on (upwelling): P = ∇T·∇C / (‖∇T‖‖∇C‖) < −0.7, chlorophyll on log10.
-  - One PNG for the pilot area, written by `build.py`, labelled with its dates.
+  - Front: the strongest 10% of SST gradients in each region's box (per run). Head-on (upwelling): P = ∇T·∇C / (‖∇T‖‖∇C‖) < −0.7, chlorophyll on log10.
+  - One PNG per pilot region, written by `build.py`, labelled with its dates.
 - **GeoJSON:** harbours, protected areas, dark vessels.
 - **Basemap:** OpenFreeMap, which needs no key. Map library: MapLibre GL.
 

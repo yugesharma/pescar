@@ -6,14 +6,17 @@ Demo:  uv run python api.py --demo   -> seed two harbours with generated trips, 
 """
 import datetime
 import random
+import re
 import sqlite3
 import sys
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 import dark
+import mpa
 from build import DB
 from fronts import PNG
 from scoring import trip_cap
@@ -109,9 +112,9 @@ def harbour(code: str, limit: float = 1.5):
         "proposals": proposals, "validation": validation,
         "weekly": [w | {"trip_cap": c} for w, c in zip(weekly, caps(1))],  # trip cap for one licensed boat
         "species": rows("SELECT s.name, s.scientific, s.status, s.source, s.year, s.target, AVG(x.share) AS share "
-                        "FROM species s LEFT JOIN habitat x ON x.species = s.name AND x.code = ? GROUP BY s.name "
+                        "FROM species s LEFT JOIN habitat x ON x.species = s.name AND x.code = ? WHERE s.region = ? GROUP BY s.name "
                         "ORDER BY s.target DESC, CASE s.status WHEN 'Overfished' THEN 0 WHEN 'Unknown' THEN 1 ELSE 2 END, s.name",
-                        code),
+                        code, h["region"]),
         "trips": [r | {"status": status(r["worst_hs_m"], limit)}
                   for r in rows("SELECT date, worst_hs_m FROM forecast WHERE code = ? ORDER BY date", code)],
     }
@@ -222,16 +225,26 @@ def seed_demo(today=None):
         print(f"{code}: {n} demo trips")
 
 
-@app.get("/api/layers/fronts.png")
-def fronts():
-    """SST/chlorophyll fronts image for the pilot area; corners and dates are in /api/harbours meta."""
-    return FileResponse(PNG, media_type="image/png", headers={"Cache-Control": "no-cache"})
+@app.get("/api/layers/fronts/{region}.png")
+def fronts(region: str):
+    """SST/chlorophyll fronts image for one pilot region; corners and dates are in /api/harbours meta."""
+    path = Path(PNG.format(region))
+    if not re.fullmatch(r"[A-Z]{2}[0-9A-Z]{2}", region) or not path.exists():
+        raise HTTPException(404, f"no fronts image for {region}")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/layers/dark.geojson")
 def dark_vessels():
     """GFW radar detections without AIS, last 7 published days; window in the top-level start/end."""
     return FileResponse(dark.latest(), media_type="application/geo+json", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/layers/mpa.geojson")
+def protected_areas():
+    """ProtectedSeas Navigator sites, Europe; version date and rule labels in the top-level version/rules. Stored gzipped."""
+    return FileResponse(mpa.latest(), media_type="application/geo+json",
+                        headers={"Cache-Control": "no-cache", "Content-Encoding": "gzip"})
 
 
 def test():

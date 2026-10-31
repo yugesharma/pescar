@@ -3,6 +3,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { useEffect, useRef, useState } from 'react'
 import type { Feature, Point } from 'geojson'
 import { fmtBearing, NM, rangeBearing, ring, type LngLat } from './geo.ts'
+import { rulesFor } from './legal.ts'
 
 type Trip = { date: string; worst_hs_m: number; status: 'GO' | 'MARGINAL' | 'NO-GO' }
 type Summary = {
@@ -52,18 +53,20 @@ const inScope = ({ cc, region }: Scope) => (x: Summary) => cc === 'europe' || (x
 const counts = <K,>(xs: K[]) => { const m = new Map<K, number>(); for (const x of xs) m.set(x, (m.get(x) ?? 0) + 1); return m }
 const fmt = (v: number) => v.toFixed(2)
 const pct = (v: number) => `${Math.round(v * 100)}%`
-// EMODnet static-gear fishing hours (ICES VMS, vessels of 12 m and over); latest ICES edition per ecoregion.
-const EMODNET = 'https://ows.emodnet-humanactivities.eu/wms?service=WMS&version=1.1.1&layers=emodnet:fishingstaticgears'
+// EMODnet fishing-vessel density (AIS, all EU seas incl. the Mediterranean), yearly average. 2023: newest full
+// year (2024 lost satellite AIS from June).
+const EMODNET = 'https://ows.emodnet-humanactivities.eu/wms?service=WMS&version=1.1.1&layers=emodnet:vesseldensity_01avg'
+const PRESSURE_YEAR = '2023'
 const PRESSURE_TILES = `${EMODNET}&request=GetMap&styles=&format=image/png&transparent=true&srs=EPSG:3857&width=256&height=256`
-  + `&bbox={bbox-epsg-3857}&CQL_FILTER=${encodeURIComponent("fo_year=2025 OR (ecoregn='Celtic Seas' AND fo_year=2024)")}`
+  + `&bbox={bbox-epsg-3857}&time=${PRESSURE_YEAR}-01-01T00:00:00Z`
 const PRESSURE_LEGEND = `${EMODNET.replace('layers=', 'layer=')}&request=GetLegendGraphic&format=application/json`
 // Legends drawn in the app's own style: colours low -> high, ticks at 0-1 along the bar.
 type Ramp = { colours: string[]; stepped?: boolean; ticks: [number, string][] }
 const SCORE_RAMP: Ramp = { colours: STOPS.map(s => s[1]), ticks: STOPS.map(([v]) => [v, fmt(v)]) }
-async function emodnetRamp(): Promise<Ramp> {  // 10 classes; label every other upper bound
-  const rules: { title: string; symbolizers: { Polygon: { fill: string } }[] }[] = (await (await fetch(PRESSURE_LEGEND)).json()).Legend[0].rules
-  return { stepped: true, colours: rules.map(r => r.symbolizers[0].Polygon.fill),
-    ticks: [[0, '0'], ...rules.flatMap((r, i) => i % 2 ? [] : [[(i + 1) / rules.length, r.title.split('<=')[1]?.trim()] as [number, string]])] }
+async function emodnetRamp(): Promise<Ramp> {  // raster colour map; stops spaced evenly, one tick per stop
+  const e: { quantity: string; color: string }[] =
+    (await (await fetch(PRESSURE_LEGEND)).json()).Legend[0].rules[0].symbolizers[0].Raster.colormap.entries
+  return { colours: e.map(x => x.color), ticks: e.map((x, i) => [i / (e.length - 1), x.quantity] as [number, string]) }
 }
 async function cmemsRamp(url: string): Promise<Ramp> {  // the legend SVG is a vertical bar, max at the top
   const svg = new DOMParser().parseFromString(await (await fetch(url)).text(), 'image/svg+xml')
@@ -91,6 +94,36 @@ const DARK = '#c98500'
 const darkRadius = (n: maplibregl.ExpressionSpecification) =>  // the legend computes the same line
   ['interpolate', ['linear'], ['sqrt', n], 1, 3, 7, 10] as maplibregl.ExpressionSpecification
 const DARK_KEY = [1, 5, 20]
+// Protected areas: ProtectedSeas Navigator Level of Fishing Protection (lfp) 1-5, split into three layers (user's choice).
+// Green, magenta, yellow pass the dataviz all-pairs check with the harbour blue; grey dashed is the quiet "no fishing rules".
+const MPA_LEVELS = ['Least restricted', 'Less restricted', 'Moderately restricted', 'Heavily restricted', 'No fishing (no-take)']
+const NO_TAKE = '#b42318', HEAVY = '#d55181', SOME = '#eda100', NONE = '#7a7974'
+const lfp = ['get', 'lfp'] as maplibregl.ExpressionSpecification
+type MpaLayer = { id: string; name: string; filter: maplibregl.ExpressionSpecification; keys: [string, 'fill' | 'solid' | 'dashed', string][] }
+const MPA_LAYERS: MpaLayer[] = [
+  { id: 'nofish', name: 'No-fishing zones', filter: ['==', lfp, 5], keys: [[NO_TAKE, 'fill', 'No fishing (no-take)']] },
+  { id: 'rules', name: 'Fishing rules', filter: ['all', ['>=', lfp, 2], ['<=', lfp, 4]],
+    keys: [[HEAVY, 'solid', '4 Heavily restricted'], [SOME, 'solid', '2–3 Some fishing rules']] },
+  { id: 'other', name: 'Other rules', filter: ['<=', lfp, 1], keys: [[NONE, 'dashed', 'Fishing allowed, other rules']] },
+]
+const levelColor = (l: number) => l === 5 ? NO_TAKE : l === 4 ? HEAVY : l >= 2 ? SOME : NONE
+const RULE = { 1: 'Banned', 2: 'Restricted', 3: 'Allowed' } as const
+const esc = (t: string) => t.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`)
+// Popup for every protected area under the click, strictest first; rules decoded from one digit per rule label.
+function mpaPopup(fs: maplibregl.MapGeoJSONFeature[], rules: string[]) {
+  const seen = new Set<string>()
+  return fs.map(f => f.properties).filter(p => !seen.has(p.name + p.designation) && seen.add(p.name + p.designation))
+    .sort((a, b) => b.lfp - a.lfp).map(p => {
+      const by = (code: number) => rules.filter((_, i) => +p.rules[i] === code).join(', ')
+      return `<div class="mpa-site"><b>${esc(p.name)}</b><br><span class="muted">${esc(p.designation ?? '')} · ${esc(p.country ?? '')}</span>
+        <div><span class="swatch" style="background:${levelColor(p.lfp)}"></span> ${p.lfp ? `${p.lfp} · ${MPA_LEVELS[p.lfp - 1]}` : 'Level not known'}</div>
+        ${([1, 2, 3] as const).filter(by).map(c => `<div><b>${RULE[c]}:</b> ${by(c)}</div>`).join('')}
+        ${p.season && p.season !== 'Year-round' ? `<div><b>Season:</b> ${esc(p.season)}</div>` : ''}
+        ${p.link ? `<a href="${esc(p.link)}" target="_blank" rel="noopener">Regulations ↗</a>` : ''}</div>`
+    }).join('')
+}
+const frontsRegions = (d: Data) => (d.meta.fronts_regions ?? '').split(',').filter(Boolean)
+const frontsBelow = (m: maplibregl.Map) => m.getStyle().layers.find(l => l.id.startsWith('fronts-'))?.id ?? 'dark'
 const dayMonth = (d: string) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' })
 const oceanQuery = (o: typeof OCEAN[number]) => `${CMEMS}?SERVICE=WMTS&LAYER=${o.layer}&STYLE=${o.style}`
 async function latestTime(layer: string) {
@@ -117,6 +150,11 @@ export default function App() {
   const [times, setTimes] = useState<Record<string, string>>({})
   const [dark, setDark] = useState(false)
   const [darkDates, setDarkDates] = useState<string>()
+  const [investOpen, setInvestOpen] = useState(false)
+  const [mpaOn, setMpaOn] = useState<Record<string, boolean>>({})
+  const mpa = MPA_LAYERS.some(l => mpaOn[l.id])
+  const [mpaVersion, setMpaVersion] = useState<string>()
+  const mpaRules = useRef<string[]>([])
   const [ramps, setRamps] = useState<Record<string, Ramp>>({})
   const asked = useRef(new Set<string>())  // legends already requested
   const [ranging, setRanging] = useState(false)
@@ -156,7 +194,7 @@ export default function App() {
       container: mapEl.current!, style: 'https://tiles.openfreemap.org/styles/positron', ...VIEWS.azores, attributionControl: { compact: true },
     })
     m.on('load', () => {
-      m.addSource('pressure', { type: 'raster', tiles: [PRESSURE_TILES], tileSize: 256, attribution: 'EMODnet Human Activities, ICES' })
+      m.addSource('pressure', { type: 'raster', tiles: [PRESSURE_TILES], tileSize: 256, attribution: 'EMODnet Human Activities' })
       m.addLayer({ id: 'pressure', type: 'raster', source: 'pressure', layout: { visibility: 'none' }, paint: { 'raster-opacity': 0.8 } })
       m.addSource('dark', { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, attribution: 'Global Fishing Watch' })
       m.addLayer({ id: 'dark', type: 'circle', source: 'dark', layout: { visibility: 'none' }, paint: {
@@ -166,6 +204,23 @@ export default function App() {
       m.on('mousemove', 'dark', e => { if (!rng.current.on) tip.setLngLat(e.lngLat)
         .setText(((n: number) => `${n} radar detection${n === 1 ? '' : 's'} without AIS`)(e.features![0].properties.detections)).addTo(m) })
       m.on('mouseleave', 'dark', () => tip.remove())
+      m.addSource('mpa', { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, attribution: 'ProtectedSeas Navigator (CC BY 4.0)' })
+      // Per layer: a fill (see-through except no-fishing) that catches clicks inside the outline, and the outline.
+      for (const l of MPA_LAYERS.toReversed()) {  // no-fishing on top
+        const filter = l.filter
+        m.addLayer({ id: `mpa-${l.id}`, type: 'fill', source: 'mpa', filter, layout: { visibility: 'none' },
+          paint: { 'fill-color': NO_TAKE, 'fill-opacity': l.id === 'nofish' ? 0.45 : 0 } }, 'dark')
+        m.addLayer({ id: `mpa-${l.id}-line`, type: 'line', source: 'mpa', filter, layout: { visibility: 'none' },
+          paint: { 'line-color': l.id === 'rules' ? ['case', ['==', lfp, 4], HEAVY, SOME] : l.keys[0][0],
+            'line-width': l.id === 'other' ? 1 : 1.5, ...(l.id === 'other' && { 'line-dasharray': [3, 2] }) } }, 'dark')
+      }
+      m.on('click', e => {
+        const layers = MPA_LAYERS.map(l => `mpa-${l.id}`).filter(id => m.getLayoutProperty(id, 'visibility') === 'visible')
+        if (rng.current.on || !layers.length || m.queryRenderedFeatures(e.point, { layers: ['harbours', 'pilot', 'clusters'] }).length) return
+        const fs = m.queryRenderedFeatures(e.point, { layers })
+        if (fs.length) new maplibregl.Popup({ maxWidth: '320px', className: 'mpa-popup' }).setLngLat(e.lngLat)
+          .setHTML(mpaPopup(fs, mpaRules.current)).addTo(m)
+      })
       // Clusters below zoom 8; each is coloured by the best harbour score inside it.
       m.addSource('harbours', {
         type: 'geojson', data: { type: 'FeatureCollection', features: [] },
@@ -248,13 +303,17 @@ export default function App() {
   }, [ranging])
   useEffect(() => { map.current?.setLayoutProperty('pressure', 'visibility', pressure ? 'visible' : 'none') }, [pressure])
   useEffect(() => {  // added once the build's corners are known; under the harbours
-    const m = map.current, corners = data?.meta.fronts_corners
-    if (!m || !corners) return
-    if (!m.getSource('fronts')) {
-      m.addSource('fronts', { type: 'image', url: '/api/layers/fronts.png', coordinates: JSON.parse(corners) })
-      m.addLayer({ id: 'fronts', type: 'raster', source: 'fronts', paint: { 'raster-resampling': 'nearest' } }, 'dark')
+    const m = map.current
+    if (!m || !data) return
+    for (const r of frontsRegions(data)) {  // one image per pilot region
+      const id = `fronts-${r}`, corners = data.meta[`fronts_corners_${r}`]
+      if (!corners) continue
+      if (!m.getSource(id)) {
+        m.addSource(id, { type: 'image', url: `/api/layers/fronts/${r}.png`, coordinates: JSON.parse(corners) })
+        m.addLayer({ id, type: 'raster', source: id, paint: { 'raster-resampling': 'nearest' } }, 'dark')
+      }
+      m.setLayoutProperty(id, 'visibility', fronts ? 'visible' : 'none')
     }
-    m.setLayoutProperty('fronts', 'visibility', fronts ? 'visible' : 'none')
   }, [fronts, data])
   useEffect(() => {  // fetched on first use; the backend refreshes it once a day
     const m = map.current
@@ -265,6 +324,17 @@ export default function App() {
     })
     m.setLayoutProperty('dark', 'visibility', dark ? 'visible' : 'none')
   }, [dark, darkDates])
+  useEffect(() => {  // fetched on first use; the backend checks for a new Navigator version once a day
+    const m = map.current
+    if (!m) return
+    if (mpa && !mpaVersion) fetch('/api/layers/mpa.geojson').then(r => r.json()).then(g => {
+      mpaRules.current = g.rules
+      ;(m.getSource('mpa') as maplibregl.GeoJSONSource).setData(g)
+      setMpaVersion(g.version)
+    })
+    for (const l of MPA_LAYERS) for (const id of [`mpa-${l.id}`, `mpa-${l.id}-line`])
+      m.setLayoutProperty(id, 'visibility', mpaOn[l.id] ? 'visible' : 'none')
+  }, [mpa, mpaOn, mpaVersion])
   useEffect(() => {  // legends: fetched the first time a layer is switched on
     const want = [...(pressure ? ['pressure'] : []), ...OCEAN.filter(o => ocean[o.id]).map(o => o.id)].filter(id => !asked.current.has(id))
     for (const id of want) {
@@ -285,7 +355,7 @@ export default function App() {
       if (!m.getSource(o.id)) {
         m.addSource(o.id, { type: 'raster', tileSize: 256, attribution: 'Copernicus Marine Service', tiles: [oceanQuery(o)
           + `&REQUEST=GetTile&TILEMATRIXSET=EPSG:3857&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&FORMAT=image/png&TIME=${times[o.id]}`] })
-        m.addLayer({ id: o.id, type: 'raster', source: o.id, paint: { 'raster-opacity': 0.8 } }, m.getLayer('fronts') ? 'fronts' : 'dark')
+        m.addLayer({ id: o.id, type: 'raster', source: o.id, paint: { 'raster-opacity': 0.8 } }, frontsBelow(m))
       }
       m.setLayoutProperty(o.id, 'visibility', ocean[o.id] ? 'visible' : 'none')
     }
@@ -312,22 +382,27 @@ export default function App() {
             </button>
             <details className="card layers" open={!PHONE}>
               <summary>Map layers</summary>
-              {toggle(pressure, setPressure, 'Fishing intensity')}
+              {toggle(pressure, setPressure, 'Fishing vessels')}
               {toggle(fronts, setFronts, 'Fish fronts')}
               {toggle(dark, setDark, 'Dark vessels')}
+              {MPA_LAYERS.map(l => <div key={l.id}>{toggle(!!mpaOn[l.id], v => setMpaOn(s => ({ ...s, [l.id]: v })), l.name)}</div>)}
               {OCEAN.map(o => <div key={o.id}>{toggle(!!ocean[o.id], v => setOcean(s => ({ ...s, [o.id]: v })), o.name)}</div>)}
             </details>
           </div>
           {label && <div className="range-label" style={{ left: label.x, top: label.y }}><b>{label.text}</b></div>}
-          {view === 'explore' && h?.species.some(s => s.share !== null) && <SpeciesCard key={h.code} h={h} />}
+          <div className="overlay top-right stack">
+            {view === 'explore' && h?.species.some(s => s.share !== null) && <SpeciesCard key={h.code} h={h} />}
+            {investOpen && h && <RulesPanel h={h} />}
+          </div>
           <div className="overlay bottom-left card legend-stack">
             <LegendItem title="Harbour score" source="Dark ring: pilot harbour (full score). Others: partial score.">
               <RampLegend r={SCORE_RAMP} />
             </LegendItem>
-            {pressure && <LegendItem title="Fishing intensity, static gears" unit="avg. MW fishing hours per 0.05° cell" source="EMODnet, ICES">
+            {pressure && <LegendItem title="Fishing vessel density" unit="hours per km² per month" source={`EMODnet, AIS, ${PRESSURE_YEAR} average`}>
               {ramps.pressure ? <RampLegend r={ramps.pressure} /> : <p className="muted">Loading…</p>}
             </LegendItem>}
-            {fronts && <LegendItem title="Fish fronts, sea temperature × chlorophyll" source={data?.meta.fronts_dates}>
+            {fronts && <LegendItem title="Fish fronts, sea temperature × chlorophyll"
+              source={data && [...new Set(frontsRegions(data).map(r => data.meta[`fronts_dates_${r}`]))].join('; ')}>
               <div className="key"><span className="swatch" style={{ background: 'rgb(214,40,40)' }} /> temperature front</div>
               <div className="key"><span className="swatch" style={{ background: 'rgb(13,148,136)' }} /> front head-on with chlorophyll (upwelling)</div>
             </LegendItem>}
@@ -336,13 +411,17 @@ export default function App() {
               <div className="key">{DARK_KEY.map(n => { const r = 3 + 7 * (Math.sqrt(n) - 1) / 6; return <span key={n} className="dot">
                 <svg width={2 * r + 2} height={2 * r + 2}><circle cx={r + 1} cy={r + 1} r={r} fill={DARK} stroke="#fff" /></svg>{n}</span> })}</div>
             </LegendItem>}
+            {mpa && <LegendItem title="Protected areas" source={`ProtectedSeas Navigator${mpaVersion ? `, ${dayMonth(mpaVersion)} ${mpaVersion.slice(0, 4)}` : ''} · click an area for its rules`}>
+              {MPA_LAYERS.filter(l => mpaOn[l.id]).flatMap(l => l.keys).map(([c, style, text]) => <div key={text} className="key">
+                <span className="swatch" style={style === 'fill' ? { background: c } : { border: `2px ${style} ${c}`, background: 'none' }} /> {text}</div>)}
+            </LegendItem>}
             {OCEAN.filter(o => ocean[o.id]).map(o => <LegendItem key={o.id} title={o.name} unit={o.unit}
               source={`Copernicus Marine${oceanTime(o) ? `, ${oceanTime(o)}` : ''}`}>
               {ramps[o.id] ? <RampLegend r={ramps[o.id]} /> : <p className="muted">Loading…</p>}
             </LegendItem>)}
           </div>
         </div>
-        {view === 'explore' && h && <InvestDrawer key={h.code} h={h} limit={limit} onSaved={() => setRev(r => r + 1)} />}
+        {h && <InvestDrawer key={h.code} h={h} limit={limit} onSaved={() => setRev(r => r + 1)} open={investOpen} onToggle={setInvestOpen} />}
       </div>
       <aside className="panel">
         {sel ? <><h1>{sel.name}</h1><p className="muted subtitle">{sel.code} · {sel.region_name}, {countryName.of(sel.cc)}</p></>
@@ -362,7 +441,7 @@ export default function App() {
         {scope.cc !== 'europe' && <label className="muted scope">Region{' '}
           <select value={scope.region} onChange={e => changeScope({ ...scope, region: e.target.value })}>
             <option value="">All of {countryName.of(scope.cc)}</option>
-            {regions.map(r => <option key={r.id} value={r.id}>{r.name} ({r.n}){r.id === PILOT.region ? ' · pilot' : ''}</option>)}
+            {regions.map(r => <option key={r.id} value={r.id}>{r.name} ({r.n}){all.some(x => x.region === r.id && x.pilot) ? ' · pilot' : ''}</option>)}
           </select>
         </label>}
         <label className="muted scope">Wave limit{' '}
@@ -386,7 +465,7 @@ export default function App() {
         </>}
 
         {data && <p className="muted">
-          Sources: Copernicus Marine, EU Fleet Register, OpenStreetMap, Global Fishing Watch, EMODnet, ICES, ICCAT, AquaMaps, FishBase.
+          Sources: Copernicus Marine, EU Fleet Register, OpenStreetMap, Global Fishing Watch, EMODnet, ICES, ICCAT, GFCM, GBIF, FishBase.
           Built {data.meta.built_at}.
         </p>}
       </aside>
@@ -479,7 +558,7 @@ const stockCounts = (h: Harbour) => (['Overfished', 'Healthy', 'Unknown'] as con
 
 function SpeciesCard({ h }: { h: Harbour }) {
   const over = h.species.filter(s => s.status === 'Overfished').length
-  return <details className="overlay top-right card species">
+  return <details className="card species">
     <summary>Species · {h.name} · {h.species.length}{over ? ` · ${over} overfished` : ''}</summary>
     <table><tbody>{h.species.map(s => (
       <tr key={s.name}>
@@ -510,7 +589,23 @@ async function post(url: string, body: object) {
 const FIELDS = [['boats', 'Boats to license'], ['training', 'Training places'], ['budget', 'Budget (€)'], ['target', 'Target trips / week']] as const
 
 // Bottom drawer: the Explore facts needed to decide | proposal form and list | cap check and validation.
-function InvestDrawer({ h, limit, onSaved }: { h: Harbour; limit: number; onSaved: () => void }) {
+// Pescatourism law for the harbour's pilot region, beside the map while Invest is open; collapsible.
+function RulesPanel({ h }: { h: Harbour }) {
+  const r = rulesFor(h.cc, h.region)
+  return <details className="card rules" open>
+    <summary>Rules · {r ? r.title : (h.pilot ? h.region_name : countryName.of(h.cc))}</summary>
+    {!r ? <p className="muted">No verified summary for this region yet.</p> : <>
+      {r.sections.map(sec => <section key={sec.h}><h3>{sec.h}</h3><ul>{sec.items.map(([t, ids]) =>
+        <li key={t}>{t} <span className="muted">{ids.map(id => <a key={id} href={`#src-${id}`}>[{id}]</a>)}</span></li>)}</ul></section>)}
+      <h3>Sources</h3>
+      <ol className="sources">{Object.entries(r.sources).map(([id, [label, url]]) =>
+        <li key={id} id={`src-${id}`}><b>{id}</b> <a href={url} target="_blank" rel="noopener">{label} ↗</a></li>)}</ol>
+    </>}
+  </details>
+}
+
+function InvestDrawer({ h, limit, onSaved, open, onToggle }:
+  { h: Harbour; limit: number; onSaved: () => void; open: boolean; onToggle: (open: boolean) => void }) {
   const [form, setForm] = useState({ boats: 2, training: 4, budget: 50000, target: 6, notes: '' })
   const [error, setError] = useState<string>()
   const [picked, setPicked] = useState<number>()
@@ -519,27 +614,16 @@ function InvestDrawer({ h, limit, onSaved }: { h: Harbour; limit: number; onSave
   const [vBoats, setVBoats] = useState<number>()
   const save = (url: string, body: object) => post(url, body).then(() => { setError(undefined); onSaved() }, e => setError(e.message))
   const n = h.proposals.length
-  return <details className="drawer">
-    <summary>Invest · {h.name} <span className={`status ${h.state}`}>{h.state}</span>
+  return <details className="drawer" open={open} onToggle={e => onToggle(e.currentTarget.open)}>
+    <summary>Invest <span className={`status ${h.state}`}>{h.state}</span>
       <span className="muted">{n} proposal{n === 1 ? '' : 's'}</span></summary>
     <div className="drawer-body">
       <section>
-        <h3>{h.name} at {limit.toFixed(1)} m</h3>
-        <div className="stats">
-          <div><b>{fmt(h.score)}</b><span className="muted">{h.pilot ? 'harbour score' : 'partial score'} · #{h.rank} of {h.of}</span></div>
-          <div><b>{eur(h.income)}</b><span className="muted">income potential per boat / year</span></div>
-          <div><b>{Math.round(h.viable_days)}</b><span className="muted">viable days / year</span></div>
-          <div><b>{Math.round(h.shoulder_days)}</b><span className="muted">in shoulder season (of 152)</span></div>
-        </div>
-        <p><strong>{h.limiting[0].toUpperCase() + h.limiting.slice(1)}</strong></p>
-        <Factor name="Community" value={h.community} />
-        <Factor name="Viability" value={h.viability} />
-        <Factor name="Attractiveness" value={h.attractiveness ?? undefined} />
-        <Factor name="Headroom" value={h.headroom ?? undefined} />
+        <h3>Season at {limit.toFixed(1)} m</h3>
+        <SeasonCurve key={`${h.code}-${limit}`} weekly={h.weekly} />
         {h.headroom !== null && <p className="muted">Trip cap per licensed boat: {capRange(h)} trips / week · stock penalty {fmt(h.stock_penalty!)}</p>}
         {h.species.length > 0 && <p className="muted">Species: {stockCounts(h).map(([s, k]) =>
           <span key={s}><span className={`status ${s}`}>{k} {s}</span> </span>)}</p>}
-        <SeasonCurve key={`${h.code}-${limit}`} weekly={h.weekly} />
       </section>
       <section>
         <h3>Proposal</h3>
@@ -572,7 +656,7 @@ function InvestDrawer({ h, limit, onSaved }: { h: Harbour; limit: number; onSave
             <p className={shown.over_weeks.length ? 'warning' : 'muted'}>{shown.over_weeks.length
               ? `⚠ ${shown.target} trips / week is over the cap in ${shown.over_weeks.length} weeks: ${runs(shown.over_weeks)}`
               : `${shown.target} trips / week is within the cap every week`} ({shown.boats} boats, {limit.toFixed(1)} m)</p>
-            <CapChart key={shown.id} weekly={h.weekly} p={shown} />
+            <WeekBars key={shown.id} label="target trips" weekly={h.weekly.map((w, i) => ({ start: weekStart(w.week), trips: shown.target, cap: shown.caps[i] }))} />
           </>}
           {h.validation ? <p>Validated {dayMonth(h.validation.date)} {h.validation.date.slice(0, 4)} · {h.validation.boats} licensed boats</p>
             : <form className="invest" onSubmit={e => { e.preventDefault()
@@ -588,7 +672,7 @@ function InvestDrawer({ h, limit, onSaved }: { h: Harbour; limit: number; onSave
   </details>
 }
 
-const INK = '#1f1f1e', OVER = '#fff4dc'
+const INK = '#1f1f1e'
 const TRIPS = BLUE, OVER_BAR = '#eb6834', ADDED = '#eb6834'  // palette slots 1 and 2
 
 // One harbour at a time: the selected one if it is watched, else a pick list of watched harbours.
@@ -650,7 +734,10 @@ function TripForm({ code, since, onSaved }: { code: string; since: string; onSav
   </details>
 }
 
-function WeekBars({ weekly }: { weekly: Watched['weekly'] }) {
+// Date for week n of a typical year, so proposal weeks reuse the WeekBars month labels
+const weekStart = (week: number) => new Date(Date.UTC(2026, 0, 1 + (week - 1) * 7)).toISOString().slice(0, 10)
+
+function WeekBars({ weekly, label = 'trips' }: { weekly: Watched['weekly']; label?: string }) {
   const [hover, setHover] = useState<number>()
   const top = Math.max(1, ...weekly.flatMap(w => [w.trips, w.cap!])) * 1.1
   const yc = (v: number) => T + (1 - v / top) * (H - T - B)
@@ -677,51 +764,13 @@ function WeekBars({ weekly }: { weekly: Watched['weekly'] }) {
       <path d={capPath} fill="none" stroke={INK} strokeWidth="2" />
     </svg>
     <p className="muted">
-      <span className="swatch" style={{ background: TRIPS }} /> trips{' '}
+      <span className="swatch" style={{ background: TRIPS }} /> {label}{' '}
       <span className="swatch" style={{ background: OVER_BAR }} /> ⚠ over cap{' '}
       <span className="swatch" style={{ background: INK }} /> trip cap
     </p>
-    <p className="muted">{hw ? `Week of ${dayMonth(hw.start)}: ${hw.trips} trips, cap ${hw.cap}${hw.trips > hw.cap! ? ' · ⚠ over cap' : ''}`
+    <p className="muted">{hw ? `Week of ${dayMonth(hw.start)}: ${hw.trips} ${label}, cap ${hw.cap}${hw.trips > hw.cap! ? ' · ⚠ over cap' : ''}`
       : 'Hover the chart for weekly values.'}</p>
   </>
-}
-
-function CapChart({ weekly, p }: { weekly: Harbour['weekly']; p: Proposal }) {
-  const [hover, setHover] = useState<number>()  // index into weekly
-  const top = Math.max(1, p.target, ...p.caps.map(c => c!)) * 1.1
-  const yc = (v: number) => T + (1 - v / top) * (H - T - B)
-  const step = (W - L - 4) / 52
-  const over = new Set(p.over_weeks)
-  const path = weekly.map((w, i) => `${i ? 'L' : 'M'}${x(w.week)},${yc(p.caps[i]!)}H${x(w.week) + step}`).join('')
-  const ticks = [0, Math.round(top / 2.2), Math.round(top / 1.1)]
-  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    const r = e.currentTarget.getBoundingClientRect()
-    const i = Math.floor((((e.clientX - r.left) / r.width) * W - L) / step)
-    setHover(i >= 0 && i < weekly.length ? i : undefined)
-  }
-  const hw = hover === undefined ? undefined : weekly[hover]
-  return (<>
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" onMouseMove={onMove} onMouseLeave={() => setHover(undefined)}
-      role="img" aria-label={`Trip cap and target trips per week; over the cap in ${p.over_weeks.length} weeks`}>
-      {weekly.filter(w => over.has(w.week)).map(w =>
-        <rect key={w.week} x={x(w.week)} y={T} width={step} height={H - T - B} fill={OVER} />)}
-      {ticks.map(v => <g key={v}>
-        <line x1={L} x2={W - 4} y1={yc(v)} y2={yc(v)} stroke="#e4e3df" />
-        <text x={L - 4} y={yc(v) + 4} fontSize="10" textAnchor="end" fill="#6b6a66">{v}</text>
-      </g>)}
-      {[...MONTHS].map((m, i) => <text key={i} x={x(weekOf(i + 0.5))} y={H - 4} fontSize="10" textAnchor="middle" fill="#6b6a66">{m}</text>)}
-      <path d={path} fill="none" stroke={BLUE} strokeWidth="2" />
-      <line x1={L} x2={W - 4} y1={yc(p.target)} y2={yc(p.target)} stroke={INK} strokeWidth="2" strokeDasharray="5 3" />
-      {hw && <line x1={x(hw.week) + step / 2} x2={x(hw.week) + step / 2} y1={T} y2={H - B} stroke="#9a9993" />}
-    </svg>
-    <p className="muted">
-      <span className="swatch" style={{ background: BLUE }} /> trip cap{' '}
-      <span className="swatch" style={{ background: INK }} /> target{' '}
-      <span className="swatch" style={{ background: OVER, outline: '1px solid #fab219' }} /> ⚠ over cap
-    </p>
-    <p className="muted">{hw ? `Week ${hw.week}: cap ${p.caps[hover!]} trips, target ${p.target}${over.has(hw.week) ? ' · ⚠ over cap' : ''}`
-      : 'Hover the chart for weekly values.'}</p>
-  </>)
 }
 
 const W = 300, H = 130, L = 28, B = 18, T = 8
@@ -754,7 +803,7 @@ function SeasonCurve({ weekly }: { weekly: Harbour['weekly'] }) {
         <circle cx={x(hover.week)} cy={y(hover.viability)} r="4" fill={BLUE} stroke="#fff" strokeWidth="2" />
       </g>}
     </svg>
-    <p className="muted">{hover ? `Week ${hover.week}: ${Math.round(hover.viability * 100)}% of days viable` : 'Hover the curve for weekly values.'}</p>
+    <p className="muted">{hover ? `Week ${hover.week}: ${Math.round(hover.viability * 100)}% of days viable (≈${(hover.viability * 7).toFixed(1)} of 7)` : 'Hover the curve for weekly values.'}</p>
   </>)
 }
 
